@@ -128,7 +128,7 @@ function Stats({ s }: { s: MarketStats }) {
 const DEP_CHUNK = 450n; // HyperEVM RPC caps eth_getLogs range (~500) and requires a topic filter
 const DEP_LOOKBACK = 12000n;
 const SUPPLY_COLLATERAL_EVENT = parseAbiItem("event SupplyCollateral(bytes32 indexed id, uint256 indexed tokenId, address indexed onBehalf)");
-const depKey = (chainId: number, a: string) => `tw28:deps:${chainId}:${a.toLowerCase()}`;
+const depKey = (chainId: number, a: string) => `tw28:deps:v2:${chainId}:${a.toLowerCase()}`;
 type DepStore = { byKey: Record<string, string[]>; lastScanned: number };
 function loadDepStore(chainId: number, a: string): DepStore {
   try { const v = JSON.parse(localStorage.getItem(depKey(chainId, a)) || "{}"); return { byKey: v.byKey || {}, lastScanned: v.lastScanned || 0 }; } catch { return { byKey: {}, lastScanned: 0 }; }
@@ -157,7 +157,8 @@ function useDeposits() {
       setScanning(true);
       const tip = await client.getBlockNumber().catch(() => null);
       if (tip) {
-        const start = store.lastScanned ? BigInt(store.lastScanned) + 1n : (tip > DEP_LOOKBACK ? tip - DEP_LOOKBACK : 0n);
+        // always re-scan the recent window (merge with cached set) so a stale cache can't hide a deposit
+        const start = tip > DEP_LOOKBACK ? tip - DEP_LOOKBACK : 0n;
         const acc: Record<string, Set<string>> = {};
         for (const mk of MARKETS) acc[mk.key] = new Set(store.byKey[mk.key] || []);
         const tasks: (() => Promise<void>)[] = [];
