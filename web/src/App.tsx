@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   useAccount, useConnect, useDisconnect, usePublicClient, useReadContracts, useSwitchChain,
   useWaitForTransactionReceipt, useWriteContract,
 } from "wagmi";
 import { useQueryClient } from "@tanstack/react-query";
-import { formatUnits, parseUnits } from "viem";
+import { formatUnits, parseAbiItem, parseUnits } from "viem";
 import { LogoLockup, Mark } from "./components/Logo";
 import { hyperEVM } from "./wagmi";
 import { ADDR, MARKETS, USDC_DECIMALS, adapterAbi, coreAbi, creditManagerAbi, erc20Abi, erc721Abi, irmAbi, marketId } from "./contracts";
@@ -13,7 +13,6 @@ const WAD = 10n ** 18n;
 const REPO = "https://github.com/twentyeightlend/twentyeight-lend-hub";
 const EXPLORER = "https://www.hyperscan.com";
 const TWITTER = "https://x.com/twentyeightlend";
-const DEPLOY_BLOCK = 36749121n;
 const fmt = (v: number, d = 2) => v.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 const short = (a?: string) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "");
 const ZERO_ADDR = "0x0000000000000000000000000000000000000000" as const;
@@ -123,38 +122,83 @@ function Stats({ s }: { s: MarketStats }) {
   );
 }
 
-// Scan the connected wallet's collateral deposits (SupplyCollateral events) across all markets.
-// Returns deposited tokenIds per market + a scanning flag. Parallelized chunks for speed.
-function useDeposits(): { byMarket: bigint[][]; scanning: boolean } {
-  const { address } = useAccount();
+// Detects the wallet's collateral deposits. The HyperEVM public RPC caps eth_getLogs at ~500 blocks,
+// so we scan in 450-block chunks (capped concurrency) and cache results in localStorage: first load
+// does a bounded scan, later loads only scan the new delta. add() records a deposit instantly.
+const DEP_CHUNK = 450n; // HyperEVM RPC caps eth_getLogs range (~500) and requires a topic filter
+const DEP_LOOKBACK = 12000n;
+const SUPPLY_COLLATERAL_EVENT = parseAbiItem("event SupplyCollateral(bytes32 indexed id, uint256 indexed tokenId, address indexed onBehalf)");
+const depKey = (chainId: number, a: string) => `tw28:deps:${chainId}:${a.toLowerCase()}`;
+type DepStore = { byKey: Record<string, string[]>; lastScanned: number };
+function loadDepStore(chainId: number, a: string): DepStore {
+  try { const v = JSON.parse(localStorage.getItem(depKey(chainId, a)) || "{}"); return { byKey: v.byKey || {}, lastScanned: v.lastScanned || 0 }; } catch { return { byKey: {}, lastScanned: 0 }; }
+}
+function saveDepStore(chainId: number, a: string, s: DepStore) { try { localStorage.setItem(depKey(chainId, a), JSON.stringify(s)); } catch { /* ignore quota */ } }
+async function runCapped(tasks: (() => Promise<void>)[], cap: number) {
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(cap, tasks.length) }, async () => { while (i < tasks.length) { await tasks[i++](); } }));
+}
+
+function useDeposits() {
+  const { address, chainId } = useAccount();
   const client = usePublicClient();
-  const [state, setState] = useState<{ byMarket: bigint[][]; scanning: boolean }>({ byMarket: MARKETS.map(() => []), scanning: false });
+  const [byMarket, setByMarket] = useState<bigint[][]>(MARKETS.map(() => []));
+  const [scanning, setScanning] = useState(false);
+  const fromStore = useCallback((store: DepStore) => {
+    setByMarket(MARKETS.map((mk) => [...new Set(store.byKey[mk.key] || [])].map(BigInt)));
+  }, []);
+
   useEffect(() => {
-    if (!address || !client) { setState({ byMarket: MARKETS.map(() => []), scanning: false }); return; }
+    if (!address || !client || !chainId) { setByMarket(MARKETS.map(() => [])); return; }
+    const store = loadDepStore(chainId, address);
+    fromStore(store);
     let cancelled = false;
-    setState((s) => ({ ...s, scanning: true }));
     (async () => {
-      const tip = await client.getBlockNumber().catch(() => DEPLOY_BLOCK);
-      const byMarket: string[][] = MARKETS.map(() => []);
-      const tasks: Promise<void>[] = [];
-      for (let mi = 0; mi < MARKETS.length; mi++) {
-        const eid = marketId(MARKETS[mi].params) as `0x${string}`;
-        for (let from = DEPLOY_BLOCK; from <= tip; from += 9000n) {
-          const to = from + 8999n > tip ? tip : from + 8999n;
-          const m = mi;
-          tasks.push(
-            client.getContractEvents({ address: ADDR.core, abi: coreAbi, eventName: "SupplyCollateral", args: { id: eid, onBehalf: address }, fromBlock: from, toBlock: to })
-              .then((logs) => { for (const lg of logs) { const t = (lg as { args: { tokenId?: bigint } }).args.tokenId; if (t !== undefined) byMarket[m].push(t.toString()); } })
-              .catch(() => {})
-          );
+      setScanning(true);
+      const tip = await client.getBlockNumber().catch(() => null);
+      if (tip) {
+        const start = store.lastScanned ? BigInt(store.lastScanned) + 1n : (tip > DEP_LOOKBACK ? tip - DEP_LOOKBACK : 0n);
+        const acc: Record<string, Set<string>> = {};
+        for (const mk of MARKETS) acc[mk.key] = new Set(store.byKey[mk.key] || []);
+        const tasks: (() => Promise<void>)[] = [];
+        for (let from = start; from <= tip; from += DEP_CHUNK + 1n) {
+          const to = from + DEP_CHUNK > tip ? tip : from + DEP_CHUNK;
+          const f = from;
+          tasks.push(async () => {
+            const logs = await client.getLogs({ address: ADDR.core, event: SUPPLY_COLLATERAL_EVENT, args: { onBehalf: address }, fromBlock: f, toBlock: to }).catch(() => []);
+            for (const l of logs) {
+              const args = l.args as { id?: string; tokenId?: bigint };
+              if (!args.id || args.tokenId === undefined) continue;
+              const mk = MARKETS.find((m) => (marketId(m.params) as string).toLowerCase() === args.id!.toLowerCase());
+              if (mk) acc[mk.key].add(args.tokenId.toString());
+            }
+          });
+        }
+        await runCapped(tasks, 6);
+        if (!cancelled) {
+          const byKey: Record<string, string[]> = {};
+          for (const mk of MARKETS) byKey[mk.key] = [...acc[mk.key]];
+          const next = { byKey, lastScanned: Number(tip) };
+          saveDepStore(chainId, address, next);
+          fromStore(next);
         }
       }
-      await Promise.all(tasks);
-      if (!cancelled) setState({ byMarket: byMarket.map((a) => [...new Set(a)].map(BigInt)), scanning: false });
+      if (!cancelled) setScanning(false);
     })();
     return () => { cancelled = true; };
-  }, [address, client]);
-  return state;
+  }, [address, client, chainId, fromStore]);
+
+  const add = useCallback((mIdx: number, tokenId: bigint) => {
+    if (!address || !chainId) return;
+    const store = loadDepStore(chainId, address);
+    const key = MARKETS[mIdx].key;
+    const set = new Set(store.byKey[key] || []); set.add(tokenId.toString());
+    store.byKey[key] = [...set];
+    saveDepStore(chainId, address, store);
+    fromStore(store);
+  }, [address, chainId, fromStore]);
+
+  return { byMarket, scanning, add };
 }
 
 function LendPanel() {
@@ -324,6 +368,8 @@ function BorrowPanel() {
   const debt = market && borrowShares > 0n && market[3] > 0n ? (borrowShares * market[2]) / market[3] : 0n;
   const available = creditLine > debt ? creditLine - debt : 0n;
   const ownsNft = !!owner && owner.toLowerCase() === me;
+  // persist any position we confirm is collateralized to this wallet (survives the RPC's log limits)
+  useEffect(() => { if (collateralized && tid !== null) deposits.add(idx, tid); }, [collateralized, tid, idx]);
 
   const typed = useMemo(() => { try { return amount ? parseUnits(amount, USDC_DECIMALS) : 0n; } catch { return 0n; } }, [amount]);
   const maxRaw = action === "borrow" ? available : debt;
