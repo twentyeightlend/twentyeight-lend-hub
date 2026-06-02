@@ -12,6 +12,7 @@ import { ADDR, MARKETS, USDC_DECIMALS, coreAbi, creditManagerAbi, erc20Abi, erc7
 const WAD = 10n ** 18n;
 const REPO = "https://github.com/twentyeightlend/twentyeight-lend-hub";
 const EXPLORER = "https://www.hyperscan.com";
+const TWITTER = "https://x.com/twentyeightlend";
 const fmt = (v: number, d = 2) => v.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 const short = (a?: string) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "");
 const ZERO_ADDR = "0x0000000000000000000000000000000000000000" as const;
@@ -370,7 +371,12 @@ export function App() {
       <footer className="footer">
         <div className="container" style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
           <span>28 LEND · HyperEVM · non-custodial</span>
-          <span style={{ display: "flex", gap: 18 }}>
+          <span style={{ display: "flex", gap: 18, alignItems: "center" }}>
+            <a href={TWITTER} target="_blank" rel="noreferrer" aria-label="X (Twitter)" style={{ color: "var(--muted)", display: "inline-flex" }}>
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden>
+                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+              </svg>
+            </a>
             <a href={REPO} target="_blank" rel="noreferrer" style={{ color: "var(--muted)" }}>Code</a>
             <a href={`${EXPLORER}/address/${ADDR.core}`} target="_blank" rel="noreferrer" style={{ color: "var(--muted)" }}>Verified contracts</a>
           </span>
