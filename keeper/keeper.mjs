@@ -34,8 +34,9 @@ const ENGINE = need("SELF_REPAY_ENGINE");
 const MARKET = need("WVENEST_MARKET");
 
 // market params (must match on-chain exactly)
-const NEST = { loanToken: USDC, veAdapter: need("NEST_ADAPTER"), oracle: ZERO(), irm: ZERO(), lltv: 0n };
-const KIT = { loanToken: USDC, veAdapter: need("KITTEN_ADAPTER"), oracle: ZERO(), irm: ZERO(), lltv: 0n };
+const IRM = env.IRM || ZERO(); // KinkIRM => interest-bearing markets; ZERO => legacy 0% markets
+const NEST = { loanToken: USDC, veAdapter: need("NEST_ADAPTER"), oracle: ZERO(), irm: IRM, lltv: 0n };
+const KIT = { loanToken: USDC, veAdapter: need("KITTEN_ADAPTER"), oracle: ZERO(), irm: IRM, lltv: 0n };
 const NEST_VOTER = need("NEST_VOTER");
 const KIT_VOTER = need("KITTEN_VOTER");
 function ZERO() { return "0x0000000000000000000000000000000000000000"; }

@@ -9,7 +9,8 @@ position's voting yield. Morpho-Blue-style architecture: an immutable singleton 
 **Launch scope:** the live product is the **self-repaying credit-line tier** — loans are sized from
 *realized* on-chain voting yield, are **non-liquidating**, and repay themselves. A separate liquid-wrapper
 collateral module (`wveNEST`) is deployed but **dormant by design** (see *Design choice* below): it is not
-enabled at launch, so lenders carry no liquid-locker / depeg exposure.
+enabled at launch, so lenders carry no liquid-locker / depeg exposure. USDC lenders supply to the
+credit-line markets and earn interest paid by borrowers out of their voting yield (see *For lenders*).
 
 ## Architecture
 **Core (live):**
@@ -40,8 +41,20 @@ Two revenue streams, both accruing on-chain to the treasury multisig — no cust
   charge borrow interest and keep a protocol reserve cut of up to 25% of that interest (`MAX_FEE`). Not
   active at launch.
 
-The performance fee is the protocol's live revenue. All fee changes flow through the 2-day Timelock (core)
-or the market owner — transparent and rate-limited, so users can see any change coming.
+The performance fee is the protocol's live revenue. The protocol may also take a cut of borrow interest
+(0% at launch, up to 25% via the Timelock). All fee changes flow through the 2-day Timelock (core) or the
+market owner — transparent and rate-limited, so users can see any change coming.
+
+## For lenders
+Supply USDC to the NEST/KITTEN credit-line markets and earn the interest borrowers pay — funded by the
+borrowers' voting bribes, not by token emissions or protocol capital. Rates follow a `KinkIRM` curve
+(2% base, 14% at 90% utilization, 100% at 100%), targeting roughly **11–13% APR** for lenders in the
+healthy utilization band (NEST voters currently earn ~19%+, so borrowers stay net-positive). The tier is
+**non-liquidating**: credit is sized conservatively below realized yield and loans self-repay, but lenders
+do bear borrower-default risk (there are no liquidations), which is why credit lines are deliberately
+conservative. Interest markets:
+- NEST: `0x6a640c12d0d1984e6230fbd7097f9fe3ce1d80520f202b02f92f5e3ce882de2c`
+- KITTEN: `0xbed26819cc1aa8bcad2a848dd14cb89e38af209ce816f073df14e3cb620e8ea9`
 
 ## Why this design
 - **On-chain, manipulation-proof credit.** Credit lines are sized from *realized, historical* per-gauge
@@ -64,10 +77,10 @@ A liquid wrapper of a *permanently* locked position has no redemption path, so i
 underlying's value and become exit liquidity — a well-documented failure mode for liquid lockers. Using
 such a token as loan collateral would risk bad debt if it depegs faster than the oracle assumes. The core
 protocol needs none of this: self-repay credit lines borrow against realized on-chain yield, never sell a
-wrapper, and never depend on a peg. The wveNEST wrapper and its collateral market are deployed but kept
-**closed** (`supplyCap = 0`); they would only be enabled later, with a peg-aware oracle (pricing wveNEST at
-the *minimum* of NEST-derived value and the wrapper's own market TWAP) and proven secondary liquidity.
-Until then, lenders carry zero liquid-locker exposure.
+wrapper, and never depend on a peg. The wveNEST collateral market is **paused** (exit-only — no new supply
+or borrow); it would only be enabled later, with a peg-aware oracle (pricing wveNEST at the *minimum* of
+NEST-derived value and the wrapper's own market TWAP) and proven secondary liquidity. Until then, lenders
+carry zero liquid-locker exposure.
 
 ## Deployed addresses (HyperEVM, chainId 999)
 | Contract | Address |
@@ -83,11 +96,12 @@ Until then, lenders carry zero liquid-locker exposure.
 | KittenAdapter | `0x295D025258E72dA9203F3aAA777Fe61B297af415` |
 | NestCreditLineManager | `0x0288cD9f29279d9CF0DcF36cC89bD0A67b4eaC6A` |
 | KittenCreditLineManager | `0x7eA45Ba437E1DC52485DD65820907953ba9ed261` |
+| KinkIRM (lender-yield model) | `0xEA58bC25A7F096fcDFbFb3aDbEDabC9edF096C42` |
 | AlgebraRouterAdapter | `0x8A7DAF63FA7C8d605a81d1D254De383c6a0b929e` |
 
 The **live** product is LendingCore + ve adapters + credit managers + SelfRepayEngine. The **wveNEST Market,
-ReceiptWrapper, HaircutOracle, and VeTwapOracle** belong to the dormant liquid-wrapper module (closed,
-`supplyCap = 0`) and are not in use at launch.
+ReceiptWrapper, HaircutOracle, and VeTwapOracle** belong to the dormant liquid-wrapper module (the market
+is **paused**, exit-only) and are not in use at launch.
 
 ## Verify it yourself
 **Build & test:**
