@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  useAccount, useConnect, useDisconnect, useReadContracts, useSwitchChain,
+  useAccount, useConnect, useDisconnect, usePublicClient, useReadContracts, useSwitchChain,
   useWaitForTransactionReceipt, useWriteContract,
 } from "wagmi";
 import { useQueryClient } from "@tanstack/react-query";
-import { formatUnits, parseUnits } from "viem";
+import { formatUnits, parseAbiItem, parseUnits } from "viem";
 import { LogoLockup, Mark } from "./components/Logo";
 import { hyperEVM } from "./wagmi";
 import { ADDR, MARKETS, USDC_DECIMALS, adapterAbi, coreAbi, creditManagerAbi, erc20Abi, erc721Abi, irmAbi, marketId } from "./contracts";
@@ -122,28 +122,76 @@ function Stats({ s }: { s: MarketStats }) {
   );
 }
 
-// The public HyperEVM RPC rate-limits eth_getLogs (and caps ranges at ~500 blocks), so brute-force
-// log scanning to discover deposits is unreliable. Instead: deposited positions are remembered in
-// localStorage (recorded the moment you deposit or view a position via a direct `position` read),
-// in-wallet veNFTs are found by enumeration, and any token ID can be entered manually. Direct reads
-// (position/ownerOf/etc.) are single calls and always work.
-const depKey = (chainId: number, a: string) => `tw28:deps:v2:${chainId}:${a.toLowerCase()}`;
-type DepStore = { byKey: Record<string, string[]> };
+// Auto-discovers deposited positions via SupplyCollateral logs (works with the dedicated RPC, which
+// supports getLogs). Results cached in localStorage (incremental + a recent-overlap re-scan so a stale
+// cache can't hide a deposit). add() records a deposit/position instantly. Manual token-ID entry +
+// in-wallet enumeration remain as RPC-independent fallbacks.
+const DEPLOY_BLOCK = 36749121n;
+const DEP_CHUNK = 4500n;          // dedicated RPC handles ~5000-block getLogs; 4500 = safe margin
+const INITIAL_LOOKBACK = 50000n;  // first-scan window when no cache
+const OVERLAP = 6000n;            // always re-scan the most recent blocks (robust to stale cache)
+const SUPPLY_COLLATERAL_EVENT = parseAbiItem("event SupplyCollateral(bytes32 indexed id, uint256 indexed tokenId, address indexed onBehalf)");
+const depKey = (chainId: number, a: string) => `tw28:deps:v3:${chainId}:${a.toLowerCase()}`;
+type DepStore = { byKey: Record<string, string[]>; lastScanned: number };
 function loadDepStore(chainId: number, a: string): DepStore {
-  try { const v = JSON.parse(localStorage.getItem(depKey(chainId, a)) || "{}"); return { byKey: v.byKey || {} }; } catch { return { byKey: {} }; }
+  try { const v = JSON.parse(localStorage.getItem(depKey(chainId, a)) || "{}"); return { byKey: v.byKey || {}, lastScanned: v.lastScanned || 0 }; } catch { return { byKey: {}, lastScanned: 0 }; }
 }
 function saveDepStore(chainId: number, a: string, s: DepStore) { try { localStorage.setItem(depKey(chainId, a), JSON.stringify(s)); } catch { /* ignore quota */ } }
+const bmax = (a: bigint, b: bigint) => (a > b ? a : b);
+const bmin = (a: bigint, b: bigint) => (a < b ? a : b);
+async function runCapped(tasks: (() => Promise<void>)[], cap: number) {
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(cap, tasks.length) }, async () => { while (i < tasks.length) { await tasks[i++](); } }));
+}
 
 function useDeposits() {
   const { address, chainId } = useAccount();
+  const client = usePublicClient();
   const [byMarket, setByMarket] = useState<bigint[][]>(MARKETS.map(() => []));
+  const [scanning, setScanning] = useState(false);
   const fromStore = useCallback((store: DepStore) => {
     setByMarket(MARKETS.map((mk) => [...new Set(store.byKey[mk.key] || [])].map(BigInt)));
   }, []);
+
   useEffect(() => {
-    if (!address || !chainId) { setByMarket(MARKETS.map(() => [])); return; }
-    fromStore(loadDepStore(chainId, address));
-  }, [address, chainId, fromStore]);
+    if (!address || !client || !chainId) { setByMarket(MARKETS.map(() => [])); return; }
+    const store = loadDepStore(chainId, address);
+    fromStore(store);
+    let cancelled = false;
+    (async () => {
+      setScanning(true);
+      const tip = await client.getBlockNumber().catch(() => null);
+      if (tip) {
+        const last = BigInt(store.lastScanned || 0);
+        let start = last > 0n ? last + 1n : bmax(tip - INITIAL_LOOKBACK, DEPLOY_BLOCK);
+        start = bmin(start, bmax(tip - OVERLAP, DEPLOY_BLOCK)); // always re-cover the recent window
+        if (start < DEPLOY_BLOCK) start = DEPLOY_BLOCK;
+        const acc: Record<string, Set<string>> = {};
+        for (const mk of MARKETS) acc[mk.key] = new Set(store.byKey[mk.key] || []);
+        const tasks: (() => Promise<void>)[] = [];
+        for (let from = start; from <= tip; from += DEP_CHUNK + 1n) {
+          const to = from + DEP_CHUNK > tip ? tip : from + DEP_CHUNK;
+          const f = from;
+          tasks.push(async () => {
+            let logs: { args: { id?: string; tokenId?: bigint } }[] = [];
+            for (let a = 0; a < 2; a++) { try { logs = await client.getLogs({ address: ADDR.core, event: SUPPLY_COLLATERAL_EVENT, args: { onBehalf: address }, fromBlock: f, toBlock: to }) as typeof logs; break; } catch { logs = []; } }
+            for (const l of logs) { const ar = l.args; if (!ar.id || ar.tokenId === undefined) continue; const mk = MARKETS.find((m) => (marketId(m.params) as string).toLowerCase() === ar.id!.toLowerCase()); if (mk) acc[mk.key].add(ar.tokenId.toString()); }
+          });
+        }
+        await runCapped(tasks, 3);
+        if (!cancelled) {
+          const byKey: Record<string, string[]> = {};
+          for (const mk of MARKETS) byKey[mk.key] = [...acc[mk.key]];
+          const next = { byKey, lastScanned: Number(tip) };
+          saveDepStore(chainId, address, next);
+          fromStore(next);
+        }
+      }
+      if (!cancelled) setScanning(false);
+    })();
+    return () => { cancelled = true; };
+  }, [address, client, chainId, fromStore]);
+
   const add = useCallback((mIdx: number, tokenId: bigint) => {
     if (!address || !chainId) return;
     const store = loadDepStore(chainId, address);
@@ -153,7 +201,8 @@ function useDeposits() {
     saveDepStore(chainId, address, store);
     fromStore(store);
   }, [address, chainId, fromStore]);
-  return { byMarket, scanning: false, add };
+
+  return { byMarket, scanning, add };
 }
 
 function LendPanel() {
@@ -579,8 +628,11 @@ function Landing({ theme, toggle, onLaunch }: { theme: string; toggle: () => voi
         </div>
       </header>
       <main className="container" style={{ flex: 1 }}>
-        <section style={{ textAlign: "center", padding: "100px 0 36px" }}>
-          <div style={{ display: "flex", justifyContent: "center", marginBottom: 30 }}><Mark size={84} /></div>
+        <section style={{ textAlign: "center", padding: "96px 0 36px" }}>
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 18 }}><Mark size={78} /></div>
+          <div style={{ fontSize: "clamp(24px, 4vw, 34px)", fontWeight: 200, letterSpacing: "0.01em", marginBottom: 22 }}>
+            twentyeight <span style={{ color: "var(--accent)" }}>lend</span>
+          </div>
           <div className="pill" style={{ marginBottom: 22 }}><span className="dot" /> Live on HyperEVM</div>
           <h1 style={{ fontSize: "clamp(44px, 8vw, 84px)", fontWeight: 200, letterSpacing: "-0.045em", lineHeight: 1.0 }}>
             Liquidity for<br />locked <span style={{ color: "var(--accent)" }}>governance</span>.
