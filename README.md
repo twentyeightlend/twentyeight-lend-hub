@@ -1,24 +1,33 @@
 # twentyeight-lend
 
 Non-custodial lending against vote-escrow (ve) NFTs on **HyperEVM (chainId 999)**. veNFT holders
-(veNEST priority, veKITTEN) borrow USDC against their locked position, self-repaid from voting yield.
-Morpho-Blue-style architecture: an immutable singleton core plus isolated, permissionless markets.
+(veNEST priority, veKITTEN) borrow USDC against their locked position, and the loan self-repays from the
+position's voting yield. Morpho-Blue-style architecture: an immutable singleton core plus isolated markets.
 
-> Status: **deployed to HyperEVM mainnet**. The market is launched with a guarded supply cap.
+> Status: **deployed to HyperEVM mainnet.**
+
+**Launch scope:** the live product is the **self-repaying credit-line tier** — loans are sized from
+*realized* on-chain voting yield, are **non-liquidating**, and repay themselves. A separate liquid-wrapper
+collateral module (`wveNEST`) is deployed but **dormant by design** (see *Design choice* below): it is not
+enabled at launch, so lenders carry no liquid-locker / depeg exposure.
 
 ## Architecture
+**Core (live):**
 - **LendingCore** — immutable singleton. Yield-tier markets keyed by `MarketParams`. On-chain credit
   lines sized from trailing-minimum voting fees (manipulation-proof historical share for NEST).
 - **ve adapters** (Nest/Kitten) — custody veNFTs, strip approvals, pass through votes, harvest fees.
 - **Credit-line managers** — compute borrowable credit from realized, historical per-gauge fee revenue.
+- **SelfRepayEngine** — harvests voting fees and swaps them (oracle-floored, sandwich-protected) to pay
+  down debt automatically; takes the 5% performance fee.
+- **Keeper + monitor** (`keeper/`) — off-chain, non-custodial ops: re-vote, self-repay, and a read-only
+  watchdog (proxy-upgrade, bad-debt, oracle-health, gas, keeper-liveness alerts).
+
+**Liquid-wrapper module (deployed, dormant — not enabled at launch):**
 - **ReceiptWrapper (wveNEST)** — liquid ERC20 wrapper over permanently-locked veNEST; Synthetix-style
   reward distribution to holders.
-- **WrappedCollateralMarket** — USDC market with wveNEST as ERC20 collateral; liquidation + collateral
-  voting-yield forwarded to borrowers.
-- **Oracles** — Algebra TWAP (NEST/WHYPE × Pyth WHYPE/USD) with a short-vs-long deviation guard, wrapped
-  by a haircut (DLOM) oracle in Morpho 1e36 convention.
-- **Keeper + monitor** (`keeper/`) — off-chain, non-custodial ops: re-vote, self-repay, liquidation
-  watch, and a read-only watchdog (proxy-upgrade, bad-debt, oracle-health, gas, keeper-liveness alerts).
+- **WrappedCollateralMarket** — USDC market with wveNEST as ERC20 collateral and liquidation.
+- **Oracles** — Algebra TWAP (NEST/WHYPE × Pyth WHYPE/USD) with a deviation guard, wrapped by a haircut
+  (DLOM) oracle. Only used by the wveNEST market.
 
 ## Economics (how the protocol earns)
 Two revenue streams, both accruing on-chain to the treasury multisig — no custody, no manual market-making.
@@ -27,12 +36,12 @@ Two revenue streams, both accruing on-chain to the treasury multisig — no cust
   fees; the `SelfRepayEngine` routes `treasuryBps = 500` (5%) of each harvest to the treasury before
   repaying the borrower. It scales with locked TVL and voting yield, and is independent of interest rates
   or liquidations — closer to a yield-vault performance fee than a traditional lending spread.
-- **Lending spread (optional, currently 0%).** The wveNEST/USDC market can charge borrow interest and
-  keep a protocol reserve cut of up to 25% of that interest (`MAX_FEE`). It launches at 0% (no interest
-  model wired) to bootstrap borrowing, and is switched on via governance as utilization grows.
+- **Lending spread (dormant module).** If/when the liquid wveNEST collateral market is enabled, it can
+  charge borrow interest and keep a protocol reserve cut of up to 25% of that interest (`MAX_FEE`). Not
+  active at launch.
 
-All fee changes flow through the 2-day Timelock (core) or the market owner — transparent and rate-limited,
-so users can see any change coming.
+The performance fee is the protocol's live revenue. All fee changes flow through the 2-day Timelock (core)
+or the market owner — transparent and rate-limited, so users can see any change coming.
 
 ## Why this design
 - **On-chain, manipulation-proof credit.** Credit lines are sized from *realized, historical* per-gauge
@@ -40,14 +49,25 @@ so users can see any change coming.
   that can be gamed.
 - **Loans repay themselves.** Voting bribes are harvested and swapped (oracle-floored, sandwich-protected)
   to pay down debt automatically — the borrower doesn't have to manage it.
-- **Two ways to borrow.** A conservative, non-liquidating yield tier (credit lines), and a capital-efficient
-  liquid tier (wveNEST as ERC20 collateral, Morpho-style with liquidation). Pick your risk.
-- **Locked collateral still earns.** wveNEST keeps earning voting yield while it backs a loan, and that
-  yield is forwarded to the borrower — you don't give up the yield to post collateral.
+- **No liquid-locker collateral risk.** The live product lends against *realized voting yield*, not against
+  a wrapper's market price. We deliberately do **not** use a liquid wrapper as loan collateral at launch
+  (see *Design choice* below), so lenders can't be hit by a wrapper depeg.
+- **Non-liquidating.** Credit is sized conservatively below realized yield and the loan self-repays — there
+  are no liquidations in the live tier.
 - **Immutable core, isolated markets.** No upgrade switch on the lending logic; per-market risk isolation;
   permissionless market creation.
 - **Yield is actively maximized.** The keeper re-votes idle positions into the highest-fee gauges each
   epoch, so the cashflow that repays loans (and feeds the performance fee) is as large as possible.
+
+## Design choice: why wveNEST collateral is dormant
+A liquid wrapper of a *permanently* locked position has no redemption path, so it can trade below the
+underlying's value and become exit liquidity — a well-documented failure mode for liquid lockers. Using
+such a token as loan collateral would risk bad debt if it depegs faster than the oracle assumes. The core
+protocol needs none of this: self-repay credit lines borrow against realized on-chain yield, never sell a
+wrapper, and never depend on a peg. The wveNEST wrapper and its collateral market are deployed but kept
+**closed** (`supplyCap = 0`); they would only be enabled later, with a peg-aware oracle (pricing wveNEST at
+the *minimum* of NEST-derived value and the wrapper's own market TWAP) and proven secondary liquidity.
+Until then, lenders carry zero liquid-locker exposure.
 
 ## Deployed addresses (HyperEVM, chainId 999)
 | Contract | Address |
@@ -64,6 +84,10 @@ so users can see any change coming.
 | NestCreditLineManager | `0x0288cD9f29279d9CF0DcF36cC89bD0A67b4eaC6A` |
 | KittenCreditLineManager | `0x7eA45Ba437E1DC52485DD65820907953ba9ed261` |
 | AlgebraRouterAdapter | `0x8A7DAF63FA7C8d605a81d1D254De383c6a0b929e` |
+
+The **live** product is LendingCore + ve adapters + credit managers + SelfRepayEngine. The **wveNEST Market,
+ReceiptWrapper, HaircutOracle, and VeTwapOracle** belong to the dormant liquid-wrapper module (closed,
+`supplyCap = 0`) and are not in use at launch.
 
 ## Verify it yourself
 **Build & test:**
