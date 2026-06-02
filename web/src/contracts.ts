@@ -73,6 +73,10 @@ export const creditManagerAbi = [
   { name: "creditLine", type: "function", stateMutability: "view", inputs: [MARKET_PARAMS_TUPLE, { name: "tokenId", type: "uint256" }], outputs: [{ type: "uint256" }] },
 ] as const;
 
+export const adapterAbi = [
+  { name: "isAcceptableCollateral", type: "function", stateMutability: "view", inputs: [{ type: "uint256" }], outputs: [{ type: "bool" }, { type: "string" }] },
+] as const;
+
 export const erc721Abi = [
   { name: "ownerOf", type: "function", stateMutability: "view", inputs: [{ type: "uint256" }], outputs: [{ type: "address" }] },
   { name: "balanceOf", type: "function", stateMutability: "view", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] },

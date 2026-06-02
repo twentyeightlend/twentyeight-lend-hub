@@ -7,7 +7,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { formatUnits, parseUnits } from "viem";
 import { LogoLockup, Mark } from "./components/Logo";
 import { hyperEVM } from "./wagmi";
-import { ADDR, MARKETS, USDC_DECIMALS, coreAbi, creditManagerAbi, erc20Abi, erc721Abi, irmAbi, marketId } from "./contracts";
+import { ADDR, MARKETS, USDC_DECIMALS, adapterAbi, coreAbi, creditManagerAbi, erc20Abi, erc721Abi, irmAbi, marketId } from "./contracts";
 
 const WAD = 10n ** 18n;
 const REPO = "https://github.com/twentyeightlend/twentyeight-lend-hub";
@@ -247,6 +247,7 @@ function BorrowPanel() {
       { address: m.veToken, abi: erc721Abi, functionName: "isApprovedForAll", args: [address ?? ZERO_ADDR, m.params.veAdapter] },
       { address: ADDR.core, abi: coreAbi, functionName: "market", args: [id] },
       { address: ADDR.usdc, abi: erc20Abi, functionName: "allowance", args: [address ?? ZERO_ADDR, ADDR.core] },
+      { address: m.params.veAdapter, abi: adapterAbi, functionName: "isAcceptableCollateral", args: [tid] },
     ] : [],
     query: { enabled: tid !== null && !!address, refetchInterval: 12_000 },
   });
@@ -256,6 +257,9 @@ function BorrowPanel() {
   const approved = (data?.[3]?.result as boolean | undefined) ?? false;
   const market = data?.[4]?.result as readonly bigint[] | undefined;
   const usdcAllowance = (data?.[5]?.result as bigint | undefined) ?? 0n;
+  const accept = data?.[6]?.result as readonly [boolean, string] | undefined;
+  const acceptable = accept ? accept[0] : true;
+  const acceptReason = accept?.[1] ?? "";
 
   // auto-detect the connected wallet's veNFTs for this market (VE tokens are ERC721Enumerable)
   const { data: nftBal } = useReadContracts({
@@ -294,7 +298,7 @@ function BorrowPanel() {
   const onAction = () => {
     if (!isConnected || wrongChain || tid === null) return;
     if (!collateralized) {
-      if (!ownsNft) return;
+      if (!ownsNft || !acceptable) return;
       if (!approved) return writeContract({ address: m.veToken, abi: erc721Abi, functionName: "setApprovalForAll", args: [m.params.veAdapter, true] });
       return writeContract({ address: ADDR.core, abi: coreAbi, functionName: "supplyCollateral", args: [m.params, tid, address!] });
     }
@@ -316,13 +320,13 @@ function BorrowPanel() {
   const cta = !isConnected ? "Connect wallet"
     : wrongChain ? "Switch to HyperEVM"
     : tid === null ? "Enter your veNFT ID"
-    : !collateralized ? (!ownsNft ? "You don't own this veNFT" : !approved ? `Approve ${m.label}` : `Deposit ${m.label} as collateral`)
+    : !collateralized ? (!ownsNft ? "You don't own this veNFT" : !acceptable ? "Not eligible as collateral" : !approved ? `Approve ${m.label}` : `Deposit ${m.label} as collateral`)
     : amt === 0n ? "Enter an amount"
     : action === "borrow" ? "Borrow USDC"
     : needsUsdcApprove ? "Approve USDC" : "Repay USDC";
 
   const disabled = busy || !isConnected || wrongChain || tid === null
-    || (!collateralized && !ownsNft)
+    || (!collateralized && (!ownsNft || !acceptable))
     || (collateralized && amt === 0n);
 
   const fmtU = (v: bigint) => fmt(Number(formatUnits(v, USDC_DECIMALS)));
@@ -349,6 +353,14 @@ function BorrowPanel() {
         )}
         {isConnected && nftCount === 0 && (
           <p className="muted" style={{ fontSize: 12, marginBottom: 14 }}>No {m.label} found in this wallet on HyperEVM.</p>
+        )}
+        {tid !== null && ownsNft && !collateralized && !acceptable && (
+          <p style={{ color: "var(--danger)", fontSize: 12.5, marginBottom: 14, lineHeight: 1.5, background: "rgba(210,73,63,0.09)", padding: "10px 12px", borderRadius: 10 }}>
+            #{tokenId} can't be used as collateral: <b>{acceptReason || "not eligible"}</b>.{" "}
+            {/attached|managed/i.test(acceptReason)
+              ? "Detach it from the managed / auto-vote position on the NEST app, then it becomes eligible."
+              : "Resolve this on the NEST app, then retry."}
+          </p>
         )}
 
         {tid !== null && (
