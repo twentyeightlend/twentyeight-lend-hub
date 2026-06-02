@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   useAccount, useConnect, useDisconnect, useReadContracts, useSwitchChain,
   useWaitForTransactionReceipt, useWriteContract,
 } from "wagmi";
 import { useQueryClient } from "@tanstack/react-query";
 import { formatUnits, parseUnits } from "viem";
-import { LogoLockup } from "./components/Logo";
+import { LogoLockup, Mark } from "./components/Logo";
 import { hyperEVM } from "./wagmi";
 import { ADDR, MARKETS, USDC_DECIMALS, coreAbi, creditManagerAbi, erc20Abi, erc721Abi, irmAbi, marketId } from "./contracts";
 
@@ -26,7 +26,7 @@ function useTheme() {
   return { theme, toggle: () => setTheme((t) => (t === "light" ? "dark" : "light")) };
 }
 
-function Header({ tab, setTab, theme, toggle }: { tab: string; setTab: (t: string) => void; theme: string; toggle: () => void }) {
+function Header({ tab, setTab, theme, toggle, onHome }: { tab: string; setTab: (t: string) => void; theme: string; toggle: () => void; onHome: () => void }) {
   const { address, isConnected, chainId } = useAccount();
   const { connect, connectors } = useConnect();
   const { disconnect } = useDisconnect();
@@ -35,14 +35,20 @@ function Header({ tab, setTab, theme, toggle }: { tab: string; setTab: (t: strin
   return (
     <header className="header">
       <div className="container header-inner">
-        <LogoLockup />
+        <span role="button" tabIndex={0} onClick={onHome} onKeyDown={(e) => e.key === "Enter" && onHome()} style={{ cursor: "pointer" }}><LogoLockup /></span>
         <nav className="nav" role="tablist">
           {["Lend", "Borrow"].map((t) => (
             <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>{t}</button>
           ))}
         </nav>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <button className="icon-btn" onClick={toggle} aria-label="Toggle theme">{theme === "light" ? "☾" : "☀"}</button>
+          <button className="icon-btn" onClick={toggle} aria-label="Toggle theme">
+            {theme === "light" ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" /></svg>
+            )}
+          </button>
           {!isConnected ? (
             <button className="btn btn-primary" disabled={!injected} onClick={() => injected && connect({ connector: injected })}>Connect</button>
           ) : chainId !== hyperEVM.id ? (
@@ -251,6 +257,23 @@ function BorrowPanel() {
   const market = data?.[4]?.result as readonly bigint[] | undefined;
   const usdcAllowance = (data?.[5]?.result as bigint | undefined) ?? 0n;
 
+  // auto-detect the connected wallet's veNFTs for this market (VE tokens are ERC721Enumerable)
+  const { data: nftBal } = useReadContracts({
+    contracts: address ? [{ address: m.veToken, abi: erc721Abi, functionName: "balanceOf", args: [address] }] : [],
+    query: { enabled: !!address, refetchInterval: 30_000 },
+  });
+  const nftCount = Number((nftBal?.[0]?.result as bigint | undefined) ?? 0n);
+  const { data: ownedData } = useReadContracts({
+    contracts: address && nftCount > 0
+      ? Array.from({ length: Math.min(nftCount, 8) }, (_, i) => ({ address: m.veToken, abi: erc721Abi, functionName: "tokenOfOwnerByIndex" as const, args: [address, BigInt(i)] }))
+      : [],
+    query: { enabled: !!address && nftCount > 0 },
+  });
+  const owned = (ownedData ?? []).map((d) => d.result as bigint | undefined).filter((x): x is bigint => x !== undefined).map(String);
+  const autofilled = useRef(false);
+  useEffect(() => { autofilled.current = false; }, [idx, address]);
+  useEffect(() => { if (!autofilled.current && !tokenId && owned.length > 0) { setTokenId(owned[0]); autofilled.current = true; } }, [owned, tokenId]);
+
   const me = (address ?? "").toLowerCase();
   const collateralized = !!pos && pos[0] !== ZERO_ADDR && pos[0].toLowerCase() === me;
   const borrowShares = pos?.[1] ?? 0n;
@@ -312,16 +335,34 @@ function BorrowPanel() {
             <button key={mk.key} className="btn" style={{ flex: 1, padding: "8px", fontSize: 13, color: i === idx ? "var(--ink)" : "var(--muted)", border: `1px solid ${i === idx ? "var(--accent)" : "transparent"}`, background: "transparent" }} onClick={() => setIdx(i)}>{mk.label}</button>
           ))}
         </div>
-        <div className="field" style={{ marginBottom: 14 }}>
+        <div className="field" style={{ marginBottom: owned.length ? 10 : 14 }}>
           <div className="sub"><span>Your {m.label} token ID</span></div>
           <div className="row"><input inputMode="numeric" aria-label="veNFT token id" placeholder="e.g. 1234" value={tokenId} onChange={(e) => setTokenId(e.target.value.replace(/[^0-9]/g, ""))} /></div>
         </div>
+        {owned.length > 0 && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14, alignItems: "center" }}>
+            <span className="muted" style={{ fontSize: 12 }}>Detected:</span>
+            {owned.map((t) => (
+              <button key={t} onClick={() => setTokenId(t)} className="pill" style={{ cursor: "pointer", border: "none", background: t === tokenId ? "var(--accent-soft)" : "var(--surface-2)", color: t === tokenId ? "var(--accent-ink)" : "var(--ink-soft)" }}>#{t}</button>
+            ))}
+          </div>
+        )}
+        {isConnected && nftCount === 0 && (
+          <p className="muted" style={{ fontSize: 12, marginBottom: 14 }}>No {m.label} found in this wallet on HyperEVM.</p>
+        )}
 
         {tid !== null && (
           <div style={{ marginBottom: 16 }}>
             <div className="kv"><span className="k">Credit line</span><span className="v">{fmtU(creditLine)} USDC</span></div>
             <div className="kv"><span className="k">Borrowed</span><span className="v">{fmtU(debt)} USDC</span></div>
             <div className="kv"><span className="k">Available to borrow</span><span className="v" style={{ color: "var(--accent)" }}>{fmtU(available)} USDC</span></div>
+            {creditLine === 0n && (
+              <p className="muted" style={{ fontSize: 12, marginTop: 10, lineHeight: 1.55 }}>
+                No credit yet. Credit is sized from this veNFT's <b>realized voting-fee history</b> — make sure the
+                position is actively voting (depositing lets the keeper vote it for you), and credit builds over the
+                next few closed epochs.
+              </p>
+            )}
           </div>
         )}
 
@@ -354,12 +395,91 @@ function BorrowPanel() {
   );
 }
 
-export function App() {
-  const { theme, toggle } = useTheme();
-  const [tab, setTab] = useState("Lend");
+function Footer() {
+  return (
+    <footer className="footer">
+      <div className="container" style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+        <span>28 LEND · HyperEVM · non-custodial</span>
+        <span style={{ display: "flex", gap: 18, alignItems: "center" }}>
+          <a href={TWITTER} target="_blank" rel="noreferrer" aria-label="X (Twitter)" style={{ color: "var(--muted)", display: "inline-flex" }}>
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden>
+              <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+            </svg>
+          </a>
+          <a href={REPO} target="_blank" rel="noreferrer" style={{ color: "var(--muted)" }}>Code</a>
+          <a href={`${EXPLORER}/address/${ADDR.core}`} target="_blank" rel="noreferrer" style={{ color: "var(--muted)" }}>Verified contracts</a>
+        </span>
+      </div>
+    </footer>
+  );
+}
+
+function ThemeToggle({ theme, toggle }: { theme: string; toggle: () => void }) {
+  return (
+    <button className="icon-btn" onClick={toggle} aria-label="Toggle theme">
+      {theme === "light" ? (
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>
+      ) : (
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" /></svg>
+      )}
+    </button>
+  );
+}
+
+function Landing({ theme, toggle, onLaunch }: { theme: string; toggle: () => void; onLaunch: () => void }) {
+  const props = [
+    { t: "Self-repaying", d: "Borrow USDC against your veNFT. Voting bribes pay the loan down automatically — no fixed schedule, no liquidations." },
+    { t: "Real yield", d: "Lenders earn USDC interest funded by on-chain voting revenue — not token emissions or subsidies." },
+    { t: "Verifiable", d: "Immutable core, 2-day timelock, no deployer backdoor. Every contract verified on-chain." },
+  ];
   return (
     <div className="app">
-      <Header tab={tab} setTab={setTab} theme={theme} toggle={toggle} />
+      <header className="header">
+        <div className="container header-inner">
+          <LogoLockup />
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <ThemeToggle theme={theme} toggle={toggle} />
+            <button className="btn btn-primary" onClick={onLaunch}>Launch App</button>
+          </div>
+        </div>
+      </header>
+      <main className="container" style={{ flex: 1 }}>
+        <section style={{ textAlign: "center", padding: "100px 0 36px" }}>
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 30 }}><Mark size={84} /></div>
+          <div className="pill" style={{ marginBottom: 22 }}><span className="dot" /> Live on HyperEVM</div>
+          <h1 style={{ fontSize: "clamp(44px, 8vw, 84px)", fontWeight: 200, letterSpacing: "-0.045em", lineHeight: 1.0 }}>
+            Liquidity for<br />locked <span style={{ color: "var(--accent)" }}>governance</span>.
+          </h1>
+          <p style={{ maxWidth: 580, margin: "26px auto 0", fontSize: 19, color: "var(--ink-soft)", lineHeight: 1.5 }}>
+            28 LEND turns vote-escrowed NFTs into self-repaying USDC loans on HyperEVM — and lets USDC lenders earn real yield from voting revenue. Non-custodial. Non-liquidating.
+          </p>
+          <div style={{ marginTop: 34, display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
+            <button className="btn btn-accent" style={{ padding: "14px 30px", fontSize: 16 }} onClick={onLaunch}>Launch App</button>
+            <a className="btn btn-ghost" style={{ padding: "14px 30px", fontSize: 16 }} href={REPO} target="_blank" rel="noreferrer">View code</a>
+          </div>
+        </section>
+        <section className="stats" style={{ margin: "20px 0 90px" }}>
+          {props.map((p) => (
+            <div className="stat" key={p.t}>
+              <div className="eyebrow">{p.t}</div>
+              <p className="muted" style={{ marginTop: 12, fontSize: 14, lineHeight: 1.55 }}>{p.d}</p>
+            </div>
+          ))}
+        </section>
+      </main>
+      <Footer />
+    </div>
+  );
+}
+
+export function App() {
+  const { theme, toggle } = useTheme();
+  const [view, setView] = useState<"landing" | "app">("landing");
+  const [tab, setTab] = useState("Lend");
+  if (view === "landing") return <Landing theme={theme} toggle={toggle} onLaunch={() => setView("app")} />;
+  return (
+    <div className="app">
+      <Header tab={tab} setTab={setTab} theme={theme} toggle={toggle} onHome={() => setView("landing")} />
       <main className="container" style={{ flex: 1 }}>
         <section className="hero">
           <div className="pill" style={{ marginBottom: 20 }}><span className="dot" /> Live on HyperEVM</div>
@@ -368,20 +488,7 @@ export function App() {
         </section>
         {tab === "Lend" ? <LendPanel /> : <BorrowPanel />}
       </main>
-      <footer className="footer">
-        <div className="container" style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-          <span>28 LEND · HyperEVM · non-custodial</span>
-          <span style={{ display: "flex", gap: 18, alignItems: "center" }}>
-            <a href={TWITTER} target="_blank" rel="noreferrer" aria-label="X (Twitter)" style={{ color: "var(--muted)", display: "inline-flex" }}>
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden>
-                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
-              </svg>
-            </a>
-            <a href={REPO} target="_blank" rel="noreferrer" style={{ color: "var(--muted)" }}>Code</a>
-            <a href={`${EXPLORER}/address/${ADDR.core}`} target="_blank" rel="noreferrer" style={{ color: "var(--muted)" }}>Verified contracts</a>
-          </span>
-        </div>
-      </footer>
+      <Footer />
     </div>
   );
 }
