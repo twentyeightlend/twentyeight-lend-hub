@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  useAccount, useConnect, useDisconnect, useReadContracts, useSwitchChain,
+  useAccount, useConnect, useDisconnect, usePublicClient, useReadContracts, useSwitchChain,
   useWaitForTransactionReceipt, useWriteContract,
 } from "wagmi";
 import { useQueryClient } from "@tanstack/react-query";
@@ -13,6 +13,7 @@ const WAD = 10n ** 18n;
 const REPO = "https://github.com/twentyeightlend/twentyeight-lend-hub";
 const EXPLORER = "https://www.hyperscan.com";
 const TWITTER = "https://x.com/twentyeightlend";
+const DEPLOY_BLOCK = 36749121n;
 const fmt = (v: number, d = 2) => v.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 const short = (a?: string) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "");
 const ZERO_ADDR = "0x0000000000000000000000000000000000000000" as const;
@@ -37,7 +38,7 @@ function Header({ tab, setTab, theme, toggle, onHome }: { tab: string; setTab: (
       <div className="container header-inner">
         <span role="button" tabIndex={0} onClick={onHome} onKeyDown={(e) => e.key === "Enter" && onHome()} style={{ cursor: "pointer" }}><LogoLockup /></span>
         <nav className="nav" role="tablist">
-          {["Lend", "Borrow"].map((t) => (
+          {["Lend", "Borrow", "Dashboard"].map((t) => (
             <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>{t}</button>
           ))}
         </nav>
@@ -351,8 +352,11 @@ function BorrowPanel() {
             ))}
           </div>
         )}
-        {isConnected && nftCount === 0 && (
+        {isConnected && nftCount === 0 && !collateralized && (
           <p className="muted" style={{ fontSize: 12, marginBottom: 14 }}>No {m.label} found in this wallet on HyperEVM.</p>
+        )}
+        {collateralized && (
+          <div className="pill" style={{ marginBottom: 14 }}><span className="dot" /> #{tokenId} deposited as collateral · voting</div>
         )}
         {tid !== null && ownsNft && !collateralized && !acceptable && (
           <p style={{ color: "var(--danger)", fontSize: 12.5, marginBottom: 14, lineHeight: 1.5, background: "rgba(210,73,63,0.09)", padding: "10px 12px", borderRadius: 10 }}>
@@ -403,6 +407,100 @@ function BorrowPanel() {
       <p className="center muted" style={{ fontSize: 12, marginTop: 14 }}>
         Your veNFT is custodied while borrowed; voting yield self-repays the loan. Credit is sized from your realized voting history. Non-liquidating — but interest accrues, so keep the loan covered by yield.
       </p>
+    </div>
+  );
+}
+
+function DashboardPanel({ onManage }: { onManage: () => void }) {
+  const { address, isConnected } = useAccount();
+  const client = usePublicClient();
+  const [deposits, setDeposits] = useState<{ mIdx: number; tokenId: bigint }[]>([]);
+  const fmtU = (v: bigint) => fmt(Number(formatUnits(v, USDC_DECIMALS)));
+
+  const { data: lendData } = useReadContracts({
+    contracts: MARKETS.flatMap((mk) => {
+      const lid = marketId(mk.params) as `0x${string}`;
+      return [
+        { address: ADDR.core, abi: coreAbi, functionName: "market", args: [lid] },
+        { address: ADDR.core, abi: coreAbi, functionName: "supplyShares", args: [lid, address ?? ZERO_ADDR] },
+      ];
+    }),
+    query: { enabled: !!address, refetchInterval: 15_000 },
+  });
+
+  useEffect(() => {
+    if (!address || !client) return;
+    let cancelled = false;
+    (async () => {
+      const tip = await client.getBlockNumber().catch(() => DEPLOY_BLOCK);
+      const found: { mIdx: number; tokenId: bigint }[] = [];
+      for (let mi = 0; mi < MARKETS.length; mi++) {
+        const eid = marketId(MARKETS[mi].params) as `0x${string}`;
+        for (let from = DEPLOY_BLOCK; from <= tip; from += 9000n) {
+          const to = from + 8999n > tip ? tip : from + 8999n;
+          const logs = await client.getContractEvents({ address: ADDR.core, abi: coreAbi, eventName: "SupplyCollateral", args: { id: eid, onBehalf: address }, fromBlock: from, toBlock: to }).catch(() => []);
+          for (const lg of logs) { const t = (lg as { args: { tokenId?: bigint } }).args.tokenId; if (t !== undefined) found.push({ mIdx: mi, tokenId: t }); }
+        }
+      }
+      const uniq = [...new Map(found.map((f) => [`${f.mIdx}:${f.tokenId}`, f])).values()];
+      if (!cancelled) setDeposits(uniq);
+    })();
+    return () => { cancelled = true; };
+  }, [address, client]);
+
+  const { data: posData } = useReadContracts({
+    contracts: deposits.flatMap((d) => {
+      const mk = MARKETS[d.mIdx]; const pid = marketId(mk.params) as `0x${string}`;
+      return [
+        { address: ADDR.core, abi: coreAbi, functionName: "position", args: [pid, d.tokenId] },
+        { address: mk.creditManager, abi: creditManagerAbi, functionName: "creditLine", args: [mk.params, d.tokenId] },
+        { address: ADDR.core, abi: coreAbi, functionName: "market", args: [pid] },
+      ];
+    }),
+    query: { enabled: deposits.length > 0, refetchInterval: 15_000 },
+  });
+
+  if (!isConnected) return <div className="panel"><div className="card card-pad coming"><p className="muted">Connect your wallet to see your positions.</p></div></div>;
+
+  const lendRows = MARKETS.map((mk, i) => {
+    const market = lendData?.[i * 2]?.result as readonly bigint[] | undefined;
+    const shares = (lendData?.[i * 2 + 1]?.result as bigint | undefined) ?? 0n;
+    const supplied = market && market[1] > 0n ? (shares * market[0]) / market[1] : 0n;
+    return { label: mk.label, supplied };
+  }).filter((r) => r.supplied > 0n);
+
+  const borrowRows = deposits.map((d, i) => {
+    const pos = posData?.[i * 3]?.result as readonly [string, bigint, bigint, number] | undefined;
+    const creditPrev = (posData?.[i * 3 + 1]?.result as bigint | undefined) ?? 0n;
+    const market = posData?.[i * 3 + 2]?.result as readonly bigint[] | undefined;
+    if (!pos || pos[0].toLowerCase() !== (address ?? "").toLowerCase()) return null;
+    const debt = market && pos[1] > 0n && market[3] > 0n ? (pos[1] * market[2]) / market[3] : 0n;
+    const credit = pos[2] > 0n ? pos[2] : creditPrev;
+    return { label: MARKETS[d.mIdx].label, tokenId: d.tokenId.toString(), credit, debt, avail: credit > debt ? credit - debt : 0n };
+  }).filter(Boolean) as { label: string; tokenId: string; credit: bigint; debt: bigint; avail: bigint }[];
+
+  return (
+    <div className="panel" style={{ maxWidth: 640 }}>
+      <div className="card card-pad" style={{ marginBottom: 16 }}>
+        <div className="eyebrow" style={{ marginBottom: 14 }}>Your supplied USDC</div>
+        {lendRows.length ? lendRows.map((r) => (
+          <div className="kv" key={r.label}><span className="k">{r.label} market</span><span className="v">{fmtU(r.supplied)} USDC</span></div>
+        )) : <p className="muted" style={{ fontSize: 14 }}>You haven't supplied USDC yet.</p>}
+      </div>
+      <div className="card card-pad">
+        <div className="eyebrow" style={{ marginBottom: 14 }}>Your borrow positions</div>
+        {borrowRows.length ? borrowRows.map((r) => (
+          <div key={r.tokenId} style={{ padding: "12px 0", borderTop: "1px solid var(--hairline)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, alignItems: "center" }}>
+              <span style={{ fontWeight: 500 }}>{r.label} #{r.tokenId}</span>
+              <button className="btn btn-ghost" style={{ padding: "5px 16px", fontSize: 13 }} onClick={onManage}>Manage</button>
+            </div>
+            <div className="kv"><span className="k">Credit line</span><span className="v">{fmtU(r.credit)} USDC</span></div>
+            <div className="kv"><span className="k">Borrowed</span><span className="v">{fmtU(r.debt)} USDC</span></div>
+            <div className="kv"><span className="k">Available</span><span className="v" style={{ color: "var(--accent)" }}>{fmtU(r.avail)} USDC</span></div>
+          </div>
+        )) : <p className="muted" style={{ fontSize: 14 }}>No collateral deposited yet.</p>}
+      </div>
     </div>
   );
 }
@@ -493,12 +591,18 @@ export function App() {
     <div className="app">
       <Header tab={tab} setTab={setTab} theme={theme} toggle={toggle} onHome={() => setView("landing")} />
       <main className="container" style={{ flex: 1 }}>
-        <section className="hero">
-          <div className="pill" style={{ marginBottom: 20 }}><span className="dot" /> Live on HyperEVM</div>
-          <h1>Earn on USDC,<br />backed by <span className="accent">voting revenue</span>.</h1>
-          <p>Supply USDC and earn yield paid by veNFT borrowers — funded by real on-chain voting bribes, not emissions or protocol capital. Target 11–13% once borrowers are active.</p>
-        </section>
-        {tab === "Lend" ? <LendPanel /> : <BorrowPanel />}
+        {tab === "Lend" ? (
+          <section className="hero">
+            <div className="pill" style={{ marginBottom: 20 }}><span className="dot" /> Live on HyperEVM</div>
+            <h1>Earn on USDC,<br />backed by <span className="accent">voting revenue</span>.</h1>
+            <p>Supply USDC and earn yield paid by veNFT borrowers — funded by real on-chain voting bribes, not emissions or protocol capital. Target 11–13% once borrowers are active.</p>
+          </section>
+        ) : (
+          <div style={{ textAlign: "center", padding: "56px 0 28px" }}>
+            <h2 style={{ fontWeight: 300, fontSize: 30, letterSpacing: "-0.03em" }}>{tab === "Borrow" ? "Borrow against your veNFT" : "Your dashboard"}</h2>
+          </div>
+        )}
+        {tab === "Lend" ? <LendPanel /> : tab === "Borrow" ? <BorrowPanel /> : <DashboardPanel onManage={() => setTab("Borrow")} />}
       </main>
       <Footer />
     </div>

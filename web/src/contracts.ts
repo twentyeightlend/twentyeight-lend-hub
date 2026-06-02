@@ -56,6 +56,11 @@ export const erc20Abi = [
 ] as const;
 
 export const coreAbi = [
+  { type: "event", name: "SupplyCollateral", inputs: [
+    { name: "id", type: "bytes32", indexed: true },
+    { name: "tokenId", type: "uint256", indexed: true },
+    { name: "onBehalf", type: "address", indexed: true },
+  ] },
   { name: "supply", type: "function", stateMutability: "nonpayable", inputs: [MARKET_PARAMS_TUPLE, { name: "assets", type: "uint256" }, { name: "onBehalf", type: "address" }], outputs: [{ type: "uint256" }] },
   { name: "withdraw", type: "function", stateMutability: "nonpayable", inputs: [MARKET_PARAMS_TUPLE, { name: "assets", type: "uint256" }, { name: "onBehalf", type: "address" }, { name: "receiver", type: "address" }], outputs: [{ type: "uint256" }] },
   { name: "supplyCollateral", type: "function", stateMutability: "nonpayable", inputs: [MARKET_PARAMS_TUPLE, { name: "tokenId", type: "uint256" }, { name: "onBehalf", type: "address" }], outputs: [] },
