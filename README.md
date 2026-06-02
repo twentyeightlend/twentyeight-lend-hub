@@ -20,6 +20,35 @@ Morpho-Blue-style architecture: an immutable singleton core plus isolated, permi
 - **Keeper + monitor** (`keeper/`) — off-chain, non-custodial ops: re-vote, self-repay, liquidation
   watch, and a read-only watchdog (proxy-upgrade, bad-debt, oracle-health, gas, keeper-liveness alerts).
 
+## Economics (how the protocol earns)
+Two revenue streams, both accruing on-chain to the treasury multisig — no custody, no manual market-making.
+
+- **Performance fee on voting yield (live, 5%).** Borrowed positions self-repay from their gauge voting
+  fees; the `SelfRepayEngine` routes `treasuryBps = 500` (5%) of each harvest to the treasury before
+  repaying the borrower. It scales with locked TVL and voting yield, and is independent of interest rates
+  or liquidations — closer to a yield-vault performance fee than a traditional lending spread.
+- **Lending spread (optional, currently 0%).** The wveNEST/USDC market can charge borrow interest and
+  keep a protocol reserve cut of up to 25% of that interest (`MAX_FEE`). It launches at 0% (no interest
+  model wired) to bootstrap borrowing, and is switched on via governance as utilization grows.
+
+All fee changes flow through the 2-day Timelock (core) or the market owner — transparent and rate-limited,
+so users can see any change coming.
+
+## Why this design
+- **On-chain, manipulation-proof credit.** Credit lines are sized from *realized, historical* per-gauge
+  fee revenue (NEST uses `balanceOfAt` at a closed epoch), not an off-chain relayer or a spot snapshot
+  that can be gamed.
+- **Loans repay themselves.** Voting bribes are harvested and swapped (oracle-floored, sandwich-protected)
+  to pay down debt automatically — the borrower doesn't have to manage it.
+- **Two ways to borrow.** A conservative, non-liquidating yield tier (credit lines), and a capital-efficient
+  liquid tier (wveNEST as ERC20 collateral, Morpho-style with liquidation). Pick your risk.
+- **Locked collateral still earns.** wveNEST keeps earning voting yield while it backs a loan, and that
+  yield is forwarded to the borrower — you don't give up the yield to post collateral.
+- **Immutable core, isolated markets.** No upgrade switch on the lending logic; per-market risk isolation;
+  permissionless market creation.
+- **Yield is actively maximized.** The keeper re-votes idle positions into the highest-fee gauges each
+  epoch, so the cashflow that repays loans (and feeds the performance fee) is as large as possible.
+
 ## Deployed addresses (HyperEVM, chainId 999)
 | Contract | Address |
 |---|---|
