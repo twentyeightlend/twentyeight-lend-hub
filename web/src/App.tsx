@@ -316,7 +316,7 @@ function BorrowPanel() {
   const cta = !isConnected ? "Connect wallet"
     : wrongChain ? "Switch to HyperEVM"
     : tid === null ? "Enter your veNFT ID"
-    : !collateralized ? (!ownsNft ? "You don't own this veNFT" : !approved ? `Approve ${m.label}` : `Deposit ${m.label}`)
+    : !collateralized ? (!ownsNft ? "You don't own this veNFT" : !approved ? `Approve ${m.label}` : `Deposit ${m.label} as collateral`)
     : amt === 0n ? "Enter an amount"
     : action === "borrow" ? "Borrow USDC"
     : needsUsdcApprove ? "Approve USDC" : "Repay USDC";
@@ -336,7 +336,7 @@ function BorrowPanel() {
           ))}
         </div>
         <div className="field" style={{ marginBottom: owned.length ? 10 : 14 }}>
-          <div className="sub"><span>Your {m.label} token ID</span></div>
+          <div className="sub"><span>Your {m.label} to deposit as collateral · token ID</span></div>
           <div className="row"><input inputMode="numeric" aria-label="veNFT token id" placeholder="e.g. 1234" value={tokenId} onChange={(e) => setTokenId(e.target.value.replace(/[^0-9]/g, ""))} /></div>
         </div>
         {owned.length > 0 && (
