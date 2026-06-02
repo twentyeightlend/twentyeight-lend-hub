@@ -8,7 +8,7 @@
 //   5) keeperLiveness  — keeper-state.json lastBlock not advancing => keeper stuck (votes/self-repay stop).
 // Safety: read-only by construction; every check isolated in try/catch; alerts are de-duplicated with a
 // cooldown so a persistent condition pages once per window, not every tick.
-import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, statSync, renameSync } from "node:fs";
 import { createPublicClient, http, getAddress, parseEther, formatEther } from "viem";
 import { marketAbi } from "./abis.mjs";
 
@@ -48,7 +48,12 @@ function loadState() {
     if (existsSync(STATE_FILE)) { try { return JSON.parse(readFileSync(STATE_FILE, "utf8")); } catch { /* corrupt -> reinit */ } }
     return { lastBlock: Number(env.START_BLOCK || 0), implBaseline: {}, lastAlerts: {}, keeperBlock: 0, keeperBlockSeenAt: 0 };
 }
-function saveState(s) { writeFileSync(STATE_FILE, JSON.stringify(s, null, 2)); }
+// atomic write: a kill mid-write can't corrupt the file (which would silently drop all impl baselines)
+function saveState(s) {
+    const tmp = STATE_FILE + ".tmp";
+    writeFileSync(tmp, JSON.stringify(s, null, 2));
+    renameSync(tmp, STATE_FILE);
+}
 
 // ---------------------------------------------------------------- alerting
 async function alert(state, key, severity, msg) {

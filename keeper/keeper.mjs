@@ -173,7 +173,8 @@ async function revoteDeposits(state) {
             const key = `${proto}:${tid}`;
             const pos = await pub.readContract({ address: CORE, abi: lendingCoreAbi, functionName: "position", args: [id, BigInt(tid)] }).catch(() => null);
             if (!pos || pos[0] === ZERO()) continue; // not custodied (e.g. withdrawn) -> skip
-            const nVotes = await pub.readContract({ address: voter, abi: voterReadAbi, functionName: "poolVoteLength", args: [BigInt(tid)] }).catch(() => 1n);
+            const nVotes = await pub.readContract({ address: voter, abi: voterReadAbi, functionName: "poolVoteLength", args: [BigInt(tid)] })
+                .catch(() => { console.warn(`  poolVoteLength read failed for ${key}; assuming voting (skip re-vote this tick)`); return 1n; });
             if (nVotes > 0n) continue; // already voting -> nothing to do
             if (pools.length === 0) { console.warn(`  revote ${key}: no VOTE_POOLS configured, skipping`); continue; }
             await send(`revote ${key}`, CORE, lendingCoreAbi, "vote", [params, BigInt(tid), voteData(pools)]);
@@ -205,14 +206,18 @@ async function harvestCollatRewards() {
 }
 
 async function watchLiquidations(state) {
+    const alive = [];
     for (const borrower of state.marketBorrowers) {
-        const healthy = await pub.readContract({ address: MARKET, abi: marketAbi, functionName: "isHealthy", args: [borrower] }).catch(() => true);
-        if (healthy) continue;
         const pos = await pub.readContract({ address: MARKET, abi: marketAbi, functionName: "position", args: [borrower] }).catch(() => null);
-        if (!pos || pos[0] === 0n) continue;
+        if (pos === null) { alive.push(borrower); continue; } // read failed -> keep, retry next tick
+        if (pos[0] === 0n && pos[1] === 0n) continue; // position fully closed -> prune from the watch list
+        alive.push(borrower);
+        const healthy = await pub.readContract({ address: MARKET, abi: marketAbi, functionName: "isHealthy", args: [borrower] }).catch(() => true);
+        if (healthy || pos[0] === 0n) continue;
         console.log(`  UNHEALTHY ${borrower} collateral=${pos[0]} — liquidating`);
         await send(`liquidate ${borrower}`, MARKET, marketAbi, "liquidate", [borrower, pos[0]]); // seize up to all collateral
     }
+    state.marketBorrowers = alive;
 }
 
 async function tick() {

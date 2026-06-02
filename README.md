@@ -124,11 +124,19 @@ cast call 0x4B5bb0C23bA48449F4cF23cAdEa5Ac2169cAb912 "getMinDelay()(uint256)" --
 
 ## Security model
 - **Core is immutable** — no proxy, no upgrade path on the lending logic.
-- **2-day Timelock** owns the core; a multisig holds proposer/executor; **the deployer has zero roles**.
-- **Guardian** can pause adapters/wrapper into exit-only mode (repay/withdraw always open).
-- **Guarded rollout** via supply cap; oracle deviation guards; on-chain liquidation with bad-debt
-  socialization; emergency-price fallback for oracle outages.
+- **2-day Timelock** owns the core; a multisig holds proposer/executor; **the deployer has zero roles** (verify above).
+- **Guardian** can pause adapters/wrapper into exit-only mode (repay/withdraw stay open).
+- **Live credit-line tier — non-liquidating by design.** Credit is sized conservatively from realized,
+  historical voting yield and loans self-repay. There are **no liquidations** in this tier; lenders bear
+  borrower-default risk (see *For lenders*), which the conservative credit sizing mitigates but does not remove.
+- **Dormant wveNEST market (paused).** When/if enabled it adds the liquidation path, bad-debt socialization,
+  oracle deviation guards, a supply cap, and an emergency-price fallback — **none of which are active today.**
 - Off-chain keeper key is low-privilege (gas-only vote/self-repay caller; cannot move user funds).
+
+## Audit status
+Internally reviewed; deployed bytecode verified against source on-chain and on the Hyperscan explorer;
+governance (Timelock, no deployer backdoor) independently verifiable via the steps above. A formal
+third-party audit is **recommended before significant TVL**. Treat current use as experimental, at your own risk.
 
 ## Repository layout
 - `src/` — contracts. `test/` — Foundry tests. `script/Deploy.s.sol` — deployment.

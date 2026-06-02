@@ -1,13 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
-import { useAccount, useConnect, useDisconnect, useReadContracts, useSwitchChain, useWriteContract } from "wagmi";
+import {
+  useAccount, useConnect, useDisconnect, useReadContracts, useSwitchChain,
+  useWaitForTransactionReceipt, useWriteContract,
+} from "wagmi";
+import { useQueryClient } from "@tanstack/react-query";
 import { formatUnits, parseUnits } from "viem";
 import { LogoLockup } from "./components/Logo";
 import { hyperEVM } from "./wagmi";
 import { ADDR, MARKETS, USDC_DECIMALS, coreAbi, erc20Abi, irmAbi, marketId } from "./contracts";
 
 const WAD = 10n ** 18n;
+const REPO = "https://github.com/twentyeightlend/twentyeight-lend-hub";
+const EXPLORER = "https://www.hyperscan.com";
 const fmt = (v: number, d = 2) => v.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 const short = (a?: string) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "");
+const ZERO_ADDR = "0x0000000000000000000000000000000000000000" as const;
 
 function useTheme() {
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "light");
@@ -28,15 +35,15 @@ function Header({ tab, setTab, theme, toggle }: { tab: string; setTab: (t: strin
     <header className="header">
       <div className="container header-inner">
         <LogoLockup />
-        <nav className="nav">
+        <nav className="nav" role="tablist">
           {["Lend", "Borrow"].map((t) => (
-            <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>{t}</button>
+            <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>{t}</button>
           ))}
         </nav>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <button className="icon-btn" onClick={toggle} title="Theme">{theme === "light" ? "☾" : "☀"}</button>
+          <button className="icon-btn" onClick={toggle} aria-label="Toggle theme">{theme === "light" ? "☾" : "☀"}</button>
           {!isConnected ? (
-            <button className="btn btn-primary" onClick={() => connect({ connector: injected })}>Connect</button>
+            <button className="btn btn-primary" disabled={!injected} onClick={() => injected && connect({ connector: injected })}>Connect</button>
           ) : chainId !== hyperEVM.id ? (
             <button className="btn btn-accent" onClick={() => switchChain({ chainId: hyperEVM.id })}>Switch to HyperEVM</button>
           ) : (
@@ -48,44 +55,60 @@ function Header({ tab, setTab, theme, toggle }: { tab: string; setTab: (t: strin
   );
 }
 
-type MarketStats = { supplyApr: number; util: number; tvl: number; position: number };
+type MarketStats = {
+  supplyAprPct: number; util: number; tvl: number;
+  positionAssets: bigint; idleLiquidity: bigint; hasBorrowers: boolean;
+};
 
-function useMarket(idx: number): MarketStats & { id: `0x${string}`; refetchKey: number } {
+function useMarket(id: `0x${string}`): MarketStats {
   const { address } = useAccount();
-  const m = MARKETS[idx];
-  const id = marketId(m.params) as `0x${string}`;
-  const { data, dataUpdatedAt } = useReadContracts({
+  const { data } = useReadContracts({
     contracts: [
       { address: ADDR.core, abi: coreAbi, functionName: "market", args: [id] },
-      { address: ADDR.core, abi: coreAbi, functionName: "supplyShares", args: [id, address ?? "0x0000000000000000000000000000000000000000"] },
+      { address: ADDR.core, abi: coreAbi, functionName: "supplyShares", args: [id, address ?? ZERO_ADDR] },
     ],
     query: { refetchInterval: 12_000 },
   });
-  const stats = useMemo<MarketStats>(() => {
-    const market = data?.[0]?.result as readonly bigint[] | undefined;
-    const shares = (data?.[1]?.result as bigint | undefined) ?? 0n;
-    if (!market) return { supplyApr: 0, util: 0, tvl: 0, position: 0 };
+  const market = data?.[0]?.result as readonly bigint[] | undefined;
+  const shares = (data?.[1]?.result as bigint | undefined) ?? 0n;
+
+  const base = useMemo(() => {
+    if (!market) return { util: 0, tvl: 0, positionAssets: 0n, idleLiquidity: 0n, hasBorrowers: false, fee: 0n, utilWad: 0n };
     const [supplyA, supplyS, borrowA, , , fee] = market;
-    const util = supplyA > 0n ? Number((borrowA * WAD) / supplyA) / 1e18 : 0;
-    const tvl = Number(formatUnits(supplyA, USDC_DECIMALS));
-    const position = supplyS > 0n ? Number(formatUnits((shares * supplyA) / supplyS, USDC_DECIMALS)) : 0;
-    return { supplyApr: 0, util, tvl, position, _fee: fee } as MarketStats & { _fee: bigint };
-  }, [data]);
-  // borrow APR from the IRM, then lender APR = borrowApr * util * (1 - fee)
+    const utilWad = supplyA > 0n ? (borrowA * WAD) / supplyA : 0n;
+    return {
+      util: Number(utilWad) / 1e18,
+      tvl: Number(formatUnits(supplyA, USDC_DECIMALS)),
+      positionAssets: supplyS > 0n ? (shares * supplyA) / supplyS : 0n,
+      idleLiquidity: supplyA > borrowA ? supplyA - borrowA : 0n,
+      hasBorrowers: borrowA > 0n,
+      fee, utilWad,
+    };
+  }, [market, shares]);
+
   const { data: aprData } = useReadContracts({
-    contracts: [{ address: ADDR.irm, abi: irmAbi, functionName: "aprAtUtilization", args: [BigInt(Math.round(stats.util * 1e18))] }],
-    query: { refetchInterval: 12_000 },
+    contracts: [{ address: ADDR.irm, abi: irmAbi, functionName: "aprAtUtilization", args: [base.utilWad] }],
+    query: { enabled: !!market, refetchInterval: 12_000 },
   });
   const borrowApr = Number(formatUnits((aprData?.[0]?.result as bigint | undefined) ?? 0n, 18));
-  const fee = Number(((stats as unknown as { _fee?: bigint })._fee ?? 0n)) / 1e18;
-  const supplyApr = borrowApr * stats.util * (1 - fee) * 100;
-  return { ...stats, supplyApr, id, refetchKey: dataUpdatedAt };
+  const fee = Number(base.fee) / 1e18;
+  const supplyAprPct = borrowApr * base.util * (1 - fee) * 100;
+
+  return {
+    supplyAprPct, util: base.util, tvl: base.tvl,
+    positionAssets: base.positionAssets, idleLiquidity: base.idleLiquidity, hasBorrowers: base.hasBorrowers,
+  };
+}
+
+function AprValue({ s }: { s: MarketStats }) {
+  if (!s.hasBorrowers) return <span title="Yield begins once borrowers draw against the market">—</span>;
+  return <>{fmt(s.supplyAprPct)}<span className="unit">%</span></>;
 }
 
 function Stats({ s }: { s: MarketStats }) {
   return (
     <div className="stats">
-      <div className="stat"><div className="label">Supply APR</div><div className="value" style={{ color: "var(--accent)" }}>{fmt(s.supplyApr)}<span className="unit">%</span></div></div>
+      <div className="stat"><div className="label">Supply APR</div><div className="value" style={{ color: "var(--accent)" }}><AprValue s={s} /></div></div>
       <div className="stat"><div className="label">Total supplied</div><div className="value">{fmt(s.tvl, 0)}<span className="unit">USDC</span></div></div>
       <div className="stat"><div className="label">Utilization</div><div className="value">{fmt(s.util * 100, 1)}<span className="unit">%</span></div></div>
     </div>
@@ -94,26 +117,44 @@ function Stats({ s }: { s: MarketStats }) {
 
 function LendPanel() {
   const { address, isConnected, chainId } = useAccount();
+  const qc = useQueryClient();
   const [idx, setIdx] = useState(0);
   const [mode, setMode] = useState<"supply" | "withdraw">("supply");
   const [amount, setAmount] = useState("");
+  const [isMax, setIsMax] = useState(false);
   const m = MARKETS[idx];
-  const market = useMarket(idx);
-  const { writeContract, isPending } = useWriteContract();
+  const id = marketId(m.params) as `0x${string}`;
+  const market = useMarket(id);
+
+  const { writeContract, data: hash, error: writeError, isPending, reset } = useWriteContract();
+  const { isLoading: isMining, isSuccess } = useWaitForTransactionReceipt({ hash });
 
   const { data: walletData } = useReadContracts({
     contracts: [
-      { address: ADDR.usdc, abi: erc20Abi, functionName: "balanceOf", args: [address ?? "0x0000000000000000000000000000000000000000"] },
-      { address: ADDR.usdc, abi: erc20Abi, functionName: "allowance", args: [address ?? "0x0000000000000000000000000000000000000000", ADDR.core] },
+      { address: ADDR.usdc, abi: erc20Abi, functionName: "balanceOf", args: [address ?? ZERO_ADDR] },
+      { address: ADDR.usdc, abi: erc20Abi, functionName: "allowance", args: [address ?? ZERO_ADDR, ADDR.core] },
     ],
     query: { enabled: !!address, refetchInterval: 12_000 },
   });
   const balance = (walletData?.[0]?.result as bigint | undefined) ?? 0n;
   const allowance = (walletData?.[1]?.result as bigint | undefined) ?? 0n;
 
-  const amt = useMemo(() => { try { return amount ? parseUnits(amount, USDC_DECIMALS) : 0n; } catch { return 0n; } }, [amount]);
+  // refetch balances/market after a confirmed tx, and clear the input
+  useEffect(() => {
+    if (isSuccess) { qc.invalidateQueries(); setAmount(""); setIsMax(false); reset(); }
+  }, [isSuccess, qc, reset]);
+  // reset input when switching mode/market
+  useEffect(() => { setAmount(""); setIsMax(false); }, [mode, idx]);
+
+  const maxRaw = mode === "supply" ? balance : market.positionAssets;
+  const maxDisplay = Number(formatUnits(maxRaw, USDC_DECIMALS));
+  const typed = useMemo(() => { try { return amount ? parseUnits(amount, USDC_DECIMALS) : 0n; } catch { return 0n; } }, [amount]);
+  // when "MAX" is active, use the exact on-chain bigint (no float round-trip)
+  const amt = isMax ? maxRaw : typed;
   const needsApprove = mode === "supply" && amt > allowance;
-  const max = mode === "supply" ? Number(formatUnits(balance, USDC_DECIMALS)) : market.position;
+  const overWithdrawLiquidity = mode === "withdraw" && amt > market.idleLiquidity;
+
+  const setMax = () => { setAmount(maxDisplay ? String(maxDisplay) : ""); setIsMax(maxRaw > 0n); };
 
   const onAction = () => {
     if (!isConnected || chainId !== hyperEVM.id || amt === 0n) return;
@@ -124,11 +165,14 @@ function LendPanel() {
     return writeContract({ address: ADDR.core, abi: coreAbi, functionName: "withdraw", args: [m.params, amt, address!, address!] });
   };
 
+  const busy = isPending || isMining;
   const cta = !isConnected ? "Connect wallet"
     : chainId !== hyperEVM.id ? "Switch to HyperEVM"
     : amt === 0n ? "Enter an amount"
+    : overWithdrawLiquidity ? "Not enough liquidity"
     : mode === "supply" ? (needsApprove ? "Approve USDC" : "Supply USDC")
     : "Withdraw USDC";
+  const disabled = busy || !isConnected || chainId !== hyperEVM.id || amt === 0n || overWithdrawLiquidity;
 
   return (
     <div className="panel">
@@ -140,23 +184,33 @@ function LendPanel() {
         </div>
         <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
           {MARKETS.map((mk, i) => (
-            <button key={mk.key} className={`btn ${i === idx ? "btn-ghost" : ""}`} style={{ flex: 1, padding: "8px", fontSize: 13, color: i === idx ? "var(--ink)" : "var(--muted)", borderColor: i === idx ? "var(--accent)" : "transparent" }} onClick={() => setIdx(i)}>{mk.label} market</button>
+            <button key={mk.key} className="btn" style={{ flex: 1, padding: "8px", fontSize: 13, color: i === idx ? "var(--ink)" : "var(--muted)", border: `1px solid ${i === idx ? "var(--accent)" : "transparent"}`, background: "transparent" }} onClick={() => setIdx(i)}>{mk.label} market</button>
           ))}
         </div>
         <div className="field">
-          <div className="sub"><span>{mode === "supply" ? "You supply" : "You withdraw"}</span><span>Max {fmt(max)} <span className="max" onClick={() => setAmount(String(max))}>USE MAX</span></span></div>
-          <div className="row"><input inputMode="decimal" placeholder="0.00" value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))} /><span className="token">USDC</span></div>
+          <div className="sub"><span>{mode === "supply" ? "You supply" : "You withdraw"}</span><span>Max {fmt(maxDisplay)} <span className="max" role="button" tabIndex={0} onClick={setMax} onKeyDown={(e) => e.key === "Enter" && setMax()}>USE MAX</span></span></div>
+          <div className="row"><input inputMode="decimal" aria-label="amount" placeholder="0.00" value={amount} onChange={(e) => { setIsMax(false); setAmount(e.target.value.replace(/[^0-9.]/g, "").replace(/(\..*)\./g, "$1")); }} /><span className="token">USDC</span></div>
         </div>
         <div style={{ marginTop: 18 }}>
-          <div className="kv"><span className="k">Supply APR</span><span className="v" style={{ color: "var(--accent)" }}>{fmt(market.supplyApr)}%</span></div>
-          <div className="kv"><span className="k">Your position</span><span className="v">{fmt(market.position)} USDC</span></div>
+          <div className="kv"><span className="k">Supply APR</span><span className="v" style={{ color: "var(--accent)" }}>{market.hasBorrowers ? `${fmt(market.supplyAprPct)}%` : "— (no borrowers yet)"}</span></div>
+          <div className="kv"><span className="k">Your position</span><span className="v">{fmt(maxDisplay && mode === "withdraw" ? maxDisplay : Number(formatUnits(market.positionAssets, USDC_DECIMALS)))} USDC</span></div>
+          {mode === "withdraw" && <div className="kv"><span className="k">Available now</span><span className="v">{fmt(Number(formatUnits(market.idleLiquidity, USDC_DECIMALS)))} USDC</span></div>}
           <hr className="divider" />
-          <button className="btn btn-accent btn-block" disabled={isPending || (isConnected && chainId === hyperEVM.id && amt === 0n)} onClick={onAction}>{isPending ? "Confirm in wallet…" : cta}</button>
+          <button className="btn btn-accent btn-block" disabled={disabled} onClick={onAction}>{busy ? (isMining ? "Transaction pending…" : "Confirm in wallet…") : cta}</button>
+          {writeError && <p className="center" style={{ color: "var(--danger)", fontSize: 13, marginTop: 12 }}>{(writeError as { shortMessage?: string }).shortMessage || "Transaction failed"}</p>}
+          {isSuccess && hash && <p className="center" style={{ color: "var(--accent)", fontSize: 13, marginTop: 12 }}>Confirmed · <a href={`${EXPLORER}/tx/${hash}`} target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>view</a></p>}
         </div>
       </div>
-      <p className="center muted" style={{ fontSize: 12, marginTop: 14 }}>
-        Yield is paid by borrowers from veNFT voting revenue. Non-liquidating tier — supplying carries borrower-default risk.
-      </p>
+      <details className="card" style={{ marginTop: 14, padding: "14px 18px", fontSize: 13 }}>
+        <summary className="muted" style={{ cursor: "pointer" }}>Risks before you supply</summary>
+        <p className="muted" style={{ marginTop: 10, lineHeight: 1.6 }}>
+          This is a <b>non-liquidating</b> market. Yield is paid by borrowers from their veNFT voting revenue —
+          there is no yield until borrowers draw against the market. Because there are <b>no liquidations</b>, if a
+          borrower stops earning/voting their loan may not fully repay; in the worst case lender principal can be
+          impaired and the loss socialized across suppliers. Credit lines are sized conservatively to mitigate this,
+          but it is not eliminated. Experimental software — supply only what you can afford to lose.
+        </p>
+      </details>
     </div>
   );
 }
@@ -185,14 +239,17 @@ export function App() {
         <section className="hero">
           <div className="pill" style={{ marginBottom: 20 }}><span className="dot" /> Live on HyperEVM</div>
           <h1>Earn on USDC,<br />backed by <span className="accent">voting revenue</span>.</h1>
-          <p>Supply USDC and earn yield paid by veNFT borrowers — funded by real on-chain voting bribes, not emissions or protocol capital.</p>
+          <p>Supply USDC and earn yield paid by veNFT borrowers — funded by real on-chain voting bribes, not emissions or protocol capital. Target 11–13% once borrowers are active.</p>
         </section>
         {tab === "Lend" ? <LendPanel /> : <BorrowPanel />}
       </main>
       <footer className="footer">
         <div className="container" style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-          <span>28 LEND · HyperEVM</span>
-          <span>Self-repaying veNFT credit · non-custodial</span>
+          <span>28 LEND · HyperEVM · non-custodial</span>
+          <span style={{ display: "flex", gap: 18 }}>
+            <a href={REPO} target="_blank" rel="noreferrer" style={{ color: "var(--muted)" }}>Code</a>
+            <a href={`${EXPLORER}/address/${ADDR.core}`} target="_blank" rel="noreferrer" style={{ color: "var(--muted)" }}>Verified contracts</a>
+          </span>
         </div>
       </footer>
     </div>
