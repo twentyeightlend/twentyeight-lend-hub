@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  useAccount, useConnect, useDisconnect, usePublicClient, useReadContracts, useSwitchChain,
+  useAccount, useConnect, useDisconnect, useReadContracts, useSwitchChain,
   useWaitForTransactionReceipt, useWriteContract,
 } from "wagmi";
 import { useQueryClient } from "@tanstack/react-query";
-import { formatUnits, parseAbiItem, parseUnits } from "viem";
+import { formatUnits, parseUnits } from "viem";
 import { LogoLockup, Mark } from "./components/Logo";
 import { hyperEVM } from "./wagmi";
 import { ADDR, MARKETS, USDC_DECIMALS, adapterAbi, coreAbi, creditManagerAbi, erc20Abi, erc721Abi, irmAbi, marketId } from "./contracts";
@@ -122,73 +122,28 @@ function Stats({ s }: { s: MarketStats }) {
   );
 }
 
-// Detects the wallet's collateral deposits. The HyperEVM public RPC caps eth_getLogs at ~500 blocks,
-// so we scan in 450-block chunks (capped concurrency) and cache results in localStorage: first load
-// does a bounded scan, later loads only scan the new delta. add() records a deposit instantly.
-const DEP_CHUNK = 450n; // HyperEVM RPC caps eth_getLogs range (~500) and requires a topic filter
-const DEP_LOOKBACK = 12000n;
-const SUPPLY_COLLATERAL_EVENT = parseAbiItem("event SupplyCollateral(bytes32 indexed id, uint256 indexed tokenId, address indexed onBehalf)");
+// The public HyperEVM RPC rate-limits eth_getLogs (and caps ranges at ~500 blocks), so brute-force
+// log scanning to discover deposits is unreliable. Instead: deposited positions are remembered in
+// localStorage (recorded the moment you deposit or view a position via a direct `position` read),
+// in-wallet veNFTs are found by enumeration, and any token ID can be entered manually. Direct reads
+// (position/ownerOf/etc.) are single calls and always work.
 const depKey = (chainId: number, a: string) => `tw28:deps:v2:${chainId}:${a.toLowerCase()}`;
-type DepStore = { byKey: Record<string, string[]>; lastScanned: number };
+type DepStore = { byKey: Record<string, string[]> };
 function loadDepStore(chainId: number, a: string): DepStore {
-  try { const v = JSON.parse(localStorage.getItem(depKey(chainId, a)) || "{}"); return { byKey: v.byKey || {}, lastScanned: v.lastScanned || 0 }; } catch { return { byKey: {}, lastScanned: 0 }; }
+  try { const v = JSON.parse(localStorage.getItem(depKey(chainId, a)) || "{}"); return { byKey: v.byKey || {} }; } catch { return { byKey: {} }; }
 }
 function saveDepStore(chainId: number, a: string, s: DepStore) { try { localStorage.setItem(depKey(chainId, a), JSON.stringify(s)); } catch { /* ignore quota */ } }
-async function runCapped(tasks: (() => Promise<void>)[], cap: number) {
-  let i = 0;
-  await Promise.all(Array.from({ length: Math.min(cap, tasks.length) }, async () => { while (i < tasks.length) { await tasks[i++](); } }));
-}
 
 function useDeposits() {
   const { address, chainId } = useAccount();
-  const client = usePublicClient();
   const [byMarket, setByMarket] = useState<bigint[][]>(MARKETS.map(() => []));
-  const [scanning, setScanning] = useState(false);
   const fromStore = useCallback((store: DepStore) => {
     setByMarket(MARKETS.map((mk) => [...new Set(store.byKey[mk.key] || [])].map(BigInt)));
   }, []);
-
   useEffect(() => {
-    if (!address || !client || !chainId) { setByMarket(MARKETS.map(() => [])); return; }
-    const store = loadDepStore(chainId, address);
-    fromStore(store);
-    let cancelled = false;
-    (async () => {
-      setScanning(true);
-      const tip = await client.getBlockNumber().catch(() => null);
-      if (tip) {
-        // always re-scan the recent window (merge with cached set) so a stale cache can't hide a deposit
-        const start = tip > DEP_LOOKBACK ? tip - DEP_LOOKBACK : 0n;
-        const acc: Record<string, Set<string>> = {};
-        for (const mk of MARKETS) acc[mk.key] = new Set(store.byKey[mk.key] || []);
-        const tasks: (() => Promise<void>)[] = [];
-        for (let from = start; from <= tip; from += DEP_CHUNK + 1n) {
-          const to = from + DEP_CHUNK > tip ? tip : from + DEP_CHUNK;
-          const f = from;
-          tasks.push(async () => {
-            const logs = await client.getLogs({ address: ADDR.core, event: SUPPLY_COLLATERAL_EVENT, args: { onBehalf: address }, fromBlock: f, toBlock: to }).catch(() => []);
-            for (const l of logs) {
-              const args = l.args as { id?: string; tokenId?: bigint };
-              if (!args.id || args.tokenId === undefined) continue;
-              const mk = MARKETS.find((m) => (marketId(m.params) as string).toLowerCase() === args.id!.toLowerCase());
-              if (mk) acc[mk.key].add(args.tokenId.toString());
-            }
-          });
-        }
-        await runCapped(tasks, 6);
-        if (!cancelled) {
-          const byKey: Record<string, string[]> = {};
-          for (const mk of MARKETS) byKey[mk.key] = [...acc[mk.key]];
-          const next = { byKey, lastScanned: Number(tip) };
-          saveDepStore(chainId, address, next);
-          fromStore(next);
-        }
-      }
-      if (!cancelled) setScanning(false);
-    })();
-    return () => { cancelled = true; };
-  }, [address, client, chainId, fromStore]);
-
+    if (!address || !chainId) { setByMarket(MARKETS.map(() => [])); return; }
+    fromStore(loadDepStore(chainId, address));
+  }, [address, chainId, fromStore]);
   const add = useCallback((mIdx: number, tokenId: bigint) => {
     if (!address || !chainId) return;
     const store = loadDepStore(chainId, address);
@@ -198,8 +153,7 @@ function useDeposits() {
     saveDepStore(chainId, address, store);
     fromStore(store);
   }, [address, chainId, fromStore]);
-
-  return { byMarket, scanning, add };
+  return { byMarket, scanning: false, add };
 }
 
 function LendPanel() {
@@ -441,7 +395,7 @@ function BorrowPanel() {
           </div>
         )}
         {isConnected && !detecting && candidates.length === 0 && !collateralized && (
-          <p className="muted" style={{ fontSize: 12, marginBottom: 14 }}>No {m.label} in this wallet, and no deposits yet.</p>
+          <p className="muted" style={{ fontSize: 12, marginBottom: 14 }}>No {m.label} in your wallet. Already deposited one? Enter its token ID above to load it.</p>
         )}
         {collateralized && (
           <div className="pill" style={{ marginBottom: 14 }}><span className="dot" /> #{tokenId} deposited as collateral · voting</div>
