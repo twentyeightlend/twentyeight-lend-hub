@@ -1,0 +1,13 @@
+out/
+cache/
+broadcast/
+lib/
+node_modules/
+.env
+.env.*
+!keeper/.env.example
+*.log
+__pycache__/
+*.tmp
+keeper/keeper-state.json
+keeper/monitor-state.json

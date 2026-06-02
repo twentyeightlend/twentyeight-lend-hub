@@ -1,0 +1,16 @@
+{
+  "name": "twentyeight-keeper",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Off-chain keeper for twentyeight-lend: re-vote on deposit, self-repay, credit refresh, liquidation watch, Pyth push.",
+  "scripts": {
+    "start": "node --env-file=.env keeper.mjs",
+    "once": "node --env-file=.env keeper.mjs --once",
+    "monitor": "node --env-file=.env monitor.mjs",
+    "monitor:once": "node --env-file=.env monitor.mjs --once"
+  },
+  "dependencies": {
+    "viem": "^2.21.0"
+  }
+}
