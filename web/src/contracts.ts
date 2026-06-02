@@ -40,8 +40,12 @@ export function marketId(p: MarketParams) {
 }
 
 export const MARKETS = [
-  { key: "NEST", label: "veNEST", params: marketParams(ADDR.nestAdapter) },
-  { key: "KITTEN", label: "veKITTEN", params: marketParams(ADDR.kittenAdapter) },
+  { key: "NEST", label: "veNEST", params: marketParams(ADDR.nestAdapter),
+    veToken: "0x2f2Ae07e3cc3391A2E27825652BA8DcdD5412074" as Address,
+    creditManager: "0x0288cD9f29279d9CF0DcF36cC89bD0A67b4eaC6A" as Address },
+  { key: "KITTEN", label: "veKITTEN", params: marketParams(ADDR.kittenAdapter),
+    veToken: "0x29d3A21fF35a519E00cF6d272f2aD897b109BD84" as Address,
+    creditManager: "0x7eA45Ba437E1DC52485DD65820907953ba9ed261" as Address },
 ] as const;
 
 // ---- ABIs (only what the UI uses) ----
@@ -54,9 +58,25 @@ export const erc20Abi = [
 export const coreAbi = [
   { name: "supply", type: "function", stateMutability: "nonpayable", inputs: [MARKET_PARAMS_TUPLE, { name: "assets", type: "uint256" }, { name: "onBehalf", type: "address" }], outputs: [{ type: "uint256" }] },
   { name: "withdraw", type: "function", stateMutability: "nonpayable", inputs: [MARKET_PARAMS_TUPLE, { name: "assets", type: "uint256" }, { name: "onBehalf", type: "address" }, { name: "receiver", type: "address" }], outputs: [{ type: "uint256" }] },
+  { name: "supplyCollateral", type: "function", stateMutability: "nonpayable", inputs: [MARKET_PARAMS_TUPLE, { name: "tokenId", type: "uint256" }, { name: "onBehalf", type: "address" }], outputs: [] },
+  { name: "withdrawCollateral", type: "function", stateMutability: "nonpayable", inputs: [MARKET_PARAMS_TUPLE, { name: "tokenId", type: "uint256" }, { name: "receiver", type: "address" }], outputs: [] },
+  { name: "borrow", type: "function", stateMutability: "nonpayable", inputs: [MARKET_PARAMS_TUPLE, { name: "tokenId", type: "uint256" }, { name: "assets", type: "uint256" }, { name: "receiver", type: "address" }], outputs: [{ type: "uint256" }] },
+  { name: "repay", type: "function", stateMutability: "nonpayable", inputs: [MARKET_PARAMS_TUPLE, { name: "tokenId", type: "uint256" }, { name: "assets", type: "uint256" }], outputs: [{ type: "uint256" }] },
   { name: "supplyShares", type: "function", stateMutability: "view", inputs: [{ type: "bytes32" }, { type: "address" }], outputs: [{ type: "uint256" }] },
+  { name: "position", type: "function", stateMutability: "view", inputs: [{ type: "bytes32" }, { type: "uint256" }],
+    outputs: [{ name: "borrower", type: "address" }, { name: "borrowShares", type: "uint128" }, { name: "creditLine", type: "uint128" }, { name: "creditLineExpiry", type: "uint64" }] },
   { name: "market", type: "function", stateMutability: "view", inputs: [{ type: "bytes32" }],
     outputs: [{ type: "uint128" }, { type: "uint128" }, { type: "uint128" }, { type: "uint128" }, { type: "uint128" }, { type: "uint128" }] },
+] as const;
+
+export const creditManagerAbi = [
+  { name: "creditLine", type: "function", stateMutability: "view", inputs: [MARKET_PARAMS_TUPLE, { name: "tokenId", type: "uint256" }], outputs: [{ type: "uint256" }] },
+] as const;
+
+export const erc721Abi = [
+  { name: "ownerOf", type: "function", stateMutability: "view", inputs: [{ type: "uint256" }], outputs: [{ type: "address" }] },
+  { name: "isApprovedForAll", type: "function", stateMutability: "view", inputs: [{ type: "address" }, { type: "address" }], outputs: [{ type: "bool" }] },
+  { name: "setApprovalForAll", type: "function", stateMutability: "nonpayable", inputs: [{ type: "address" }, { type: "bool" }], outputs: [] },
 ] as const;
 
 export const irmAbi = [
