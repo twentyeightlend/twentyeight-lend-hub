@@ -31,7 +31,7 @@ credit-line markets and earn interest paid by borrowers out of their voting yiel
   (DLOM) oracle. Only used by the wveNEST market.
 
 ## Economics (how the protocol earns)
-Two revenue streams, both accruing on-chain to the treasury multisig — no custody, no manual market-making.
+Two revenue streams, both accruing on-chain to the treasury (currently a single owner key; multisig migration pending) — no custody, no manual market-making.
 
 - **Performance fee on voting yield (live, 5%).** Borrowed positions self-repay from their gauge voting
   fees; the `SelfRepayEngine` routes `treasuryBps = 500` (5%) of each harvest to the treasury before
@@ -124,7 +124,9 @@ cast call 0x4B5bb0C23bA48449F4cF23cAdEa5Ac2169cAb912 "getMinDelay()(uint256)" --
 
 ## Security model
 - **Core is immutable** — no proxy, no upgrade path on the lending logic.
-- **2-day Timelock** owns the core; a multisig holds proposer/executor; **the deployer has zero roles** (verify above).
+- **2-day Timelock** owns the core; **the deployer has zero roles** (verify above). ⚠️ The Timelock's proposer/executor
+  is currently a **single owner key**, not yet a multisig — migration to a ≥2/3 Gnosis Safe is pending. The 2-day delay
+  protects against rushed changes, but do not treat governance as multisig-secured until the Safe migration is done.
 - **Guardian** can pause adapters/wrapper into exit-only mode (repay/withdraw stay open).
 - **Live credit-line tier — non-liquidating by design.** Credit is sized conservatively from realized,
   historical voting yield and loans self-repay. There are **no liquidations** in this tier; lenders bear

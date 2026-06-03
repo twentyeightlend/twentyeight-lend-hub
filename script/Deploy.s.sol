@@ -63,7 +63,9 @@ contract Deploy is Script {
     uint256 constant DLOM_BPS = 4000; // 40% illiquidity haircut on wveNEST
     uint256 constant LLTV = 0.5e18; // 50%
     uint256 constant LIQUIDATION_BONUS = 1.08e18; // 8%
-    uint256 constant INITIAL_SUPPLY_CAP = 250_000e6; // guarded rollout: $250k USDC
+    // guarded rollout caps (USDC, 6dec). Raised gradually post-launch (≤2x/day per market).
+    uint256 constant LENDING_SUPPLY_CAP = 15_000e6; // veNFT yield markets (KITTEN/NEST) — launch cap
+    uint256 constant WVENEST_SUPPLY_CAP = 15_000e6; // wveNEST principal market (Phase 3) — applied when it goes live
 
     function run() external {
         address multisig = vm.envAddress("MULTISIG"); // Gnosis Safe (proposer/executor + fast roles)
@@ -74,6 +76,10 @@ contract Deploy is Script {
         uint256 timelockDelay = vm.envOr("TIMELOCK_MIN_DELAY", uint256(2 days));
 
         (address[] memory tokens, bytes32[] memory feeds) = _priced();
+
+        // The broadcasting EOA. It owns the core just long enough to set the guarded caps atomically,
+        // then hands governance to the Timelock — so the markets can never be live uncapped.
+        address deployer = msg.sender;
 
         vm.startBroadcast();
 
@@ -92,8 +98,10 @@ contract Deploy is Script {
         AlgebraRouterAdapter routerAdapter = new AlgebraRouterAdapter(KITTEN_ALGEBRA_ROUTER);
         address router = address(routerAdapter);
 
-        // 1) immutable core (veNFT cashflow lending) — owned by the Timelock
-        LendingCore core = new LendingCore(address(timelock), treasury);
+        // 1) immutable core (veNFT cashflow lending). Owned by the deployer for the duration of this
+        //    script only, so the guarded supply caps are set BEFORE the core can accept any deposit;
+        //    ownership is then transferred to the Timelock (step 7).
+        LendingCore core = new LendingCore(deployer, treasury);
 
         // 2) adapters (guardian can pause on a NEST/KITTEN proxy-upgrade emergency)
         KittenAdapter kittenAdapter = new KittenAdapter(address(core), VE_KITTEN, KITTEN_VOTER, KITTEN, guardian);
@@ -120,6 +128,13 @@ contract Deploy is Script {
         core.createMarket(kittenMkt, address(kittenCM), address(engine), keeper);
         core.createMarket(nestMkt, address(nestCM), address(engine), keeper);
 
+        // 5a) GUARDED ROLLOUT: cap both markets at $15k while still deployer-owned, so neither market
+        //     is ever live uncapped. The cap is enforced in supply(); raises later go through the
+        //     Timelock (≤2x/day, never removable in one tx). Emergency inflow-stop is separately
+        //     covered instantly by the guardian adapter-pause (no need to lower the cap fast).
+        core.setSupplyCap(kittenMkt, LENDING_SUPPLY_CAP);
+        core.setSupplyCap(nestMkt, LENDING_SUPPLY_CAP);
+
         // 6) permanent-veNEST liquid wrapper (wveNEST) + its principal-collateral market.
         //    addRewardToken is guardian-only -> done POST-DEPLOY by the guardian multisig.
         ReceiptWrapper wrapper = new ReceiptWrapper(VE_NEST, NEST_VOTER, NEST, guardian, keeper, yieldReceiver);
@@ -136,6 +151,11 @@ contract Deploy is Script {
             USDC, address(wrapper), address(haircut), address(0), LLTV, LIQUIDATION_BONUS, multisig, treasury
         );
 
+        // 7) hand core governance to the Timelock now that the guarded caps are set. 2-step: the
+        //    Timelock must {acceptOwnership} post-deploy (multisig proposal). Until it does, the
+        //    deployer remains owner — caps are already in place, so the markets stay capped throughout.
+        core.transferOwnership(address(timelock));
+
         vm.stopBroadcast();
 
         console2.log("Timelock           ", address(timelock));
@@ -150,12 +170,14 @@ contract Deploy is Script {
         console2.log("VeTwapOracle(NEST) ", address(nestTwap));
         console2.log("HaircutOracle      ", address(haircut));
         console2.log("wveNEST Market     ", address(wveNestMarket));
+        console2.log("=== veNFT markets launched CAPPED at $15k each (KITTEN + NEST) ===");
         console2.log("=== POST-DEPLOY ACTIONS (multisig/guardian) ===");
-        console2.log("1. guardian: wrapper.addRewardToken(WHYPE/USDC/USDT0/UETH) for pro-rata distribution");
-        console2.log("2. multisig(owner): wveNestMarket.setSupplyCap(250000e6) for guarded rollout");
-        console2.log("3. multisig: document/rehearse setEmergencyPrice procedure for oracle outage");
-        console2.log("4. verify TWAP window vs live pool depth; raise supplyCap as confidence grows");
-        console2.log("5. LendingCore fee changes flow through the Timelock (proposer=multisig, delay set)");
+        console2.log("1. Timelock: acceptOwnership() on LendingCore (multisig proposal) to finish governance handoff");
+        console2.log("2. guardian: wrapper.addRewardToken(WHYPE/USDC/USDT0/UETH) for pro-rata distribution");
+        console2.log("3. multisig(owner): wveNestMarket.setSupplyCap(15000e6) when the principal market goes live");
+        console2.log("4. multisig: document/rehearse setEmergencyPrice procedure for oracle outage");
+        console2.log("5. raise veNFT-market caps gradually via Timelock as confidence grows (<=2x/day, on-chain)");
+        console2.log("6. LendingCore fee + cap changes flow through the Timelock (proposer=multisig, delay set)");
     }
 
     function _priced() internal pure returns (address[] memory tokens, bytes32[] memory feeds) {

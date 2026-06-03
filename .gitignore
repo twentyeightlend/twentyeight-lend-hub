@@ -11,3 +11,6 @@ __pycache__/
 *.tmp
 keeper/keeper-state.json
 keeper/monitor-state.json
+
+# server infra — contains RPC key, never commit
+web/deploy/

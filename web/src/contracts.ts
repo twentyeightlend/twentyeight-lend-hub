@@ -40,10 +40,10 @@ export function marketId(p: MarketParams) {
 }
 
 export const MARKETS = [
-  { key: "NEST", label: "veNEST", params: marketParams(ADDR.nestAdapter),
+  { key: "NEST", label: "veNEST", logo: "/nest-mark.svg", params: marketParams(ADDR.nestAdapter),
     veToken: "0x2f2Ae07e3cc3391A2E27825652BA8DcdD5412074" as Address,
     creditManager: "0x0288cD9f29279d9CF0DcF36cC89bD0A67b4eaC6A" as Address },
-  { key: "KITTEN", label: "veKITTEN", params: marketParams(ADDR.kittenAdapter),
+  { key: "KITTEN", label: "veKITTEN", logo: "/kitten-mark.svg", params: marketParams(ADDR.kittenAdapter),
     veToken: "0x29d3A21fF35a519E00cF6d272f2aD897b109BD84" as Address,
     creditManager: "0x7eA45Ba437E1DC52485DD65820907953ba9ed261" as Address },
 ] as const;
@@ -61,6 +61,20 @@ export const coreAbi = [
     { name: "tokenId", type: "uint256", indexed: true },
     { name: "onBehalf", type: "address", indexed: true },
   ] },
+  { type: "event", name: "Borrow", inputs: [
+    { name: "id", type: "bytes32", indexed: true },
+    { name: "tokenId", type: "uint256", indexed: true },
+    { name: "receiver", type: "address", indexed: false },
+    { name: "assets", type: "uint256", indexed: false },
+    { name: "shares", type: "uint256", indexed: false },
+  ] },
+  { type: "event", name: "Repay", inputs: [
+    { name: "id", type: "bytes32", indexed: true },
+    { name: "tokenId", type: "uint256", indexed: true },
+    { name: "onBehalf", type: "address", indexed: true },
+    { name: "assets", type: "uint256", indexed: false },
+    { name: "shares", type: "uint256", indexed: false },
+  ] },
   { name: "supply", type: "function", stateMutability: "nonpayable", inputs: [MARKET_PARAMS_TUPLE, { name: "assets", type: "uint256" }, { name: "onBehalf", type: "address" }], outputs: [{ type: "uint256" }] },
   { name: "withdraw", type: "function", stateMutability: "nonpayable", inputs: [MARKET_PARAMS_TUPLE, { name: "assets", type: "uint256" }, { name: "onBehalf", type: "address" }, { name: "receiver", type: "address" }], outputs: [{ type: "uint256" }] },
   { name: "supplyCollateral", type: "function", stateMutability: "nonpayable", inputs: [MARKET_PARAMS_TUPLE, { name: "tokenId", type: "uint256" }, { name: "onBehalf", type: "address" }], outputs: [] },
@@ -72,7 +86,12 @@ export const coreAbi = [
     outputs: [{ name: "borrower", type: "address" }, { name: "borrowShares", type: "uint128" }, { name: "creditLine", type: "uint128" }, { name: "creditLineExpiry", type: "uint64" }] },
   { name: "market", type: "function", stateMutability: "view", inputs: [{ type: "bytes32" }],
     outputs: [{ type: "uint128" }, { type: "uint128" }, { type: "uint128" }, { type: "uint128" }, { type: "uint128" }, { type: "uint128" }] },
+  { name: "supplyCap", type: "function", stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "uint256" }] },
+  { name: "lastCapRaise", type: "function", stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "uint256" }] },
 ] as const;
+
+// Guarded-rollout cap ramp (mirrors LendingCore constants: ≤2x, ≤once/day).
+export const CAP_RAISE_INTERVAL_SECONDS = 24 * 60 * 60;
 
 export const creditManagerAbi = [
   { name: "creditLine", type: "function", stateMutability: "view", inputs: [MARKET_PARAMS_TUPLE, { name: "tokenId", type: "uint256" }], outputs: [{ type: "uint256" }] },
@@ -92,4 +111,14 @@ export const erc721Abi = [
 
 export const irmAbi = [
   { name: "aprAtUtilization", type: "function", stateMutability: "view", inputs: [{ type: "uint256" }], outputs: [{ type: "uint256" }] },
+] as const;
+
+// NEST Voter — for detaching a managed/auto-vote veNEST before it can be used as collateral.
+// Only the veNFT owner can call; blocked in the first/last hour of each weekly epoch (VoteDelay).
+export const NEST_VOTER = "0x566bdc5444fd5fe5d93ec379Bd66eC861ddbA901" as Address;
+export const nestVoterAbi = [
+  { name: "dettachFromManagedNFT", type: "function", stateMutability: "nonpayable", inputs: [{ name: "tokenId", type: "uint256" }], outputs: [] },
+  { type: "error", name: "VoteDelay", inputs: [] },
+  { type: "error", name: "AccessDenied", inputs: [] },
+  { type: "error", name: "NotAttached", inputs: [] },
 ] as const;

@@ -36,6 +36,12 @@ contract LendingCore is IERC721Receiver, ReentrancyGuard {
     uint256 internal constant CREDIT_TTL = 15 minutes;
     /// @dev A loan can't be opened against an expiring (non-permanent) lock inside this window.
     uint256 internal constant MIN_LOAN_MATURITY = 7 days;
+    /// @dev Guarded-rollout cap ramp. A finite supply cap may be raised at most once per interval
+    ///      and by at most CAP_RAISE_FACTOR_BPS (2x). Geometric ≈ +100%/day reaches large TVL in
+    ///      days, while making a fat-finger or compromised owner unable to un-bound exposure in a
+    ///      single tx. Lowering is always allowed (de-risk now); jumping to uncapped is forbidden.
+    uint256 internal constant CAP_RAISE_INTERVAL = 1 days;
+    uint256 internal constant CAP_RAISE_FACTOR_BPS = 20_000; // 200% = 2x
 
     /// @notice Treasury fee recipient. The ONLY governance surface besides per-market fee.
     address public feeRecipient;
@@ -54,6 +60,11 @@ contract LendingCore is IERC721Receiver, ReentrancyGuard {
     /// @dev write-once vote keeper per market; may re-vote idle positions so they keep earning
     ///      (mitigates the non-liquidating freeze if a borrower goes dark). address(0) => none.
     mapping(Id => address) public voteKeeper;
+    /// @notice Per-market supply cap in loanToken units for a guarded rollout. 0 = uncapped
+    ///         (the default, so a market that never enters guarded mode is unaffected).
+    mapping(Id => uint256) public supplyCap;
+    /// @dev Timestamp of the last cap raise per market, for the rate limiter.
+    mapping(Id => uint256) public lastCapRaise;
     /// @dev marketParams kept on-chain for adapters/keepers to reconstruct.
     mapping(Id => MarketParams) internal _idToParams;
 
@@ -69,6 +80,7 @@ contract LendingCore is IERC721Receiver, ReentrancyGuard {
     event AccrueInterest(Id indexed id, uint256 interest, uint256 feeShares);
     event SetFeeRecipient(address recipient);
     event SetFee(Id indexed id, uint256 fee);
+    event SetSupplyCap(Id indexed id, uint256 cap);
 
     error NotOwner();
     error MarketExists();
@@ -85,6 +97,10 @@ contract LendingCore is IERC721Receiver, ReentrancyGuard {
     error LockTooCloseToExpiry();
     error NotAuthorizedToVote();
     error AdapterPaused();
+    error SupplyCapExceeded();
+    error InvalidCap();
+    error CapRaiseTooSoon();
+    error CapRaiseTooLarge();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -146,6 +162,9 @@ contract LendingCore is IERC721Receiver, ReentrancyGuard {
         if (assets == 0) revert InconsistentInput();
         if (onBehalf == address(0)) revert ZeroAddress();
         if (IVeAdapter(params.veAdapter).paused()) revert AdapterPaused();
+
+        uint256 cap = supplyCap[id];
+        if (cap != 0 && uint256(market[id].totalSupplyAssets) + assets > cap) revert SupplyCapExceeded();
 
         shares = assets.toSharesDown(market[id].totalSupplyAssets, market[id].totalSupplyShares);
         supplyShares[id][onBehalf] += shares;
@@ -410,6 +429,31 @@ contract LendingCore is IERC721Receiver, ReentrancyGuard {
         _accrue(id, params);
         market[id].fee = uint128(fee);
         emit SetFee(id, fee);
+    }
+
+    /// @notice Set the per-market supply cap (loanToken units) for a guarded rollout.
+    /// @dev Lowering is always allowed (de-risk immediately). Entering guarded mode (uncapped ->
+    ///      finite) is a tightening and is free. Raising a finite cap is rate-limited to at most
+    ///      2x and at most once per CAP_RAISE_INTERVAL. Returning to uncapped (0) is forbidden:
+    ///      to scale up, ramp geometrically so no single tx can un-bound exposure.
+    function setSupplyCap(MarketParams memory params, uint256 newCap) external onlyOwner {
+        if (newCap == 0) revert InvalidCap();
+        Id id = params.id();
+        if (market[id].lastUpdate == 0) revert MarketNotCreated();
+
+        uint256 current = supplyCap[id];
+        if (current == 0) {
+            // Entering guarded mode from uncapped: a tightening. Start the ramp clock so the first
+            // raise still waits a full interval.
+            lastCapRaise[id] = block.timestamp;
+        } else if (newCap > current) {
+            if (block.timestamp < lastCapRaise[id] + CAP_RAISE_INTERVAL) revert CapRaiseTooSoon();
+            if (newCap > current * CAP_RAISE_FACTOR_BPS / 10_000) revert CapRaiseTooLarge();
+            lastCapRaise[id] = block.timestamp;
+        }
+        // else: lowering a finite cap — always allowed, clock unchanged.
+        supplyCap[id] = newCap;
+        emit SetSupplyCap(id, newCap);
     }
 
     /// @notice 2-step ownership: the new owner must {acceptOwnership}, so a typo can't brick governance.

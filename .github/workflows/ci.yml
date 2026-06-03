@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    name: Forge tests + invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Build
+        run: forge build --sizes
+
+      - name: Test (unit + invariant, exclude live-fork)
+        run: forge test --no-match-path "test/Fork*.t.sol" -vv
+
+  slither:
+    name: Slither static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Run Slither
+        uses: crytic/slither-action@v0.4.0
+        with:
+          fail-on: high
+          slither-config: slither.config.json
+          sarif: results.sarif
+
+      - name: Upload SARIF
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: slither-results
+          path: results.sarif

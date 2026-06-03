@@ -28,6 +28,7 @@ const USDC = need("USDC");
 const PYTH = need("PYTH");
 const HERMES = env.HERMES_URL || "https://hermes.pyth.network";
 const FEED_IDS = (env.PYTH_FEED_IDS || "").split(",").map((s) => s.trim()).filter(Boolean);
+const SELF_REPAY_INTERVAL = Number(env.SELF_REPAY_INTERVAL_SECONDS || 21600); // min seconds between self-repays (+Pyth pushes) per position; 6h default
 
 const CORE = need("LENDING_CORE");
 const ENGINE = need("SELF_REPAY_ENGINE");
@@ -67,7 +68,7 @@ const KIT_ID = marketId(KIT);
 
 // ---------------------------------------------------------------- state
 function freshState() {
-    return { lastBlock: Number(env.START_BLOCK || 0), nestTokens: [], kitTokens: [], marketBorrowers: [] };
+    return { lastBlock: Number(env.START_BLOCK || 0), nestTokens: [], kitTokens: [], marketBorrowers: [], lastSelfRepay: {} };
 }
 function loadState() {
     if (existsSync(STATE_FILE)) {
@@ -93,35 +94,41 @@ const uniqPush = (arr, v) => { if (!arr.includes(v)) arr.push(v); };
 
 // ---------------------------------------------------------------- tx helper
 async function send(label, address, abi, functionName, args, value = 0n) {
-    if (DRY) { console.log(`  [DRY] ${label} ${functionName}(${args.map(String).join(",")})${value ? ` value=${value}` : ""}`); return; }
+    if (DRY) { console.log(`  [DRY] ${label} ${functionName}(${args.map(String).join(",")})${value ? ` value=${value}` : ""}`); return true; }
     try {
         const { request } = await pub.simulateContract({ account, address, abi, functionName, args, value });
         const hash = await wallet.writeContract(request);
         console.log(`  [tx] ${label} ${functionName} -> ${hash}`);
         await pub.waitForTransactionReceipt({ hash });
+        return true;
     } catch (e) {
         console.warn(`  [skip] ${label} ${functionName}: ${(e.shortMessage || e.message || "").split("\n")[0].slice(0, 90)}`);
+        return false;
     }
 }
 
 // ---------------------------------------------------------------- jobs
-async function pushPyth(state) {
-    if (FEED_IDS.length === 0) return;
-    // Only push when there's something oracle-dependent to protect. An empty market needs no
-    // fresh feed; pushing every tick would needlessly drain the keeper's gas. scanEvents runs
-    // first so this sees up-to-date position counts.
-    if (!state.marketBorrowers.length && !state.nestTokens.length && !state.kitTokens.length) {
-        console.log("  pyth: no positions yet, skip push");
-        return;
+// Pyth is PUSHED ON DEMAND — at most once per tick, and ONLY right before an action that needs a
+// fresh oracle price (a self-repay that's actually firing, or a liquidation). NEVER on a timer.
+// This is the core fix for the gas drain: idle/healthy positions push nothing; cost scales with work.
+let pythDoneThisTick = false;
+async function ensurePyth() {
+    if (pythDoneThisTick) return true;       // already fresh this tick
+    if (FEED_IDS.length === 0) return false;
+    try {
+        const ids = FEED_IDS.map((id) => `ids[]=${id}`).join("&");
+        const r = await fetch(`${HERMES}/v2/updates/price/latest?${ids}&encoding=hex`, { signal: AbortSignal.timeout(12000) });
+        if (!r.ok) { console.warn("  pyth: hermes fetch failed", r.status); return false; }
+        const j = await r.json();
+        const updateData = (j.binary?.data || []).map((h) => (h.startsWith("0x") ? h : `0x${h}`));
+        if (updateData.length === 0) { console.warn("  pyth: no update data"); return false; }
+        const fee = await pub.readContract({ address: PYTH, abi: pythAbi, functionName: "getUpdateFee", args: [updateData] });
+        pythDoneThisTick = await send("pyth", PYTH, pythAbi, "updatePriceFeeds", [updateData], fee);
+        return pythDoneThisTick;
+    } catch (e) {
+        console.warn("  pyth: push failed", (e.message || "").slice(0, 80));
+        return false;
     }
-    const ids = FEED_IDS.map((id) => `ids[]=${id}`).join("&");
-    const r = await fetch(`${HERMES}/v2/updates/price/latest?${ids}&encoding=hex`, { signal: AbortSignal.timeout(12000) });
-    if (!r.ok) { console.warn("  pyth: hermes fetch failed", r.status); return; }
-    const j = await r.json();
-    const updateData = (j.binary?.data || []).map((h) => (h.startsWith("0x") ? h : `0x${h}`));
-    if (updateData.length === 0) { console.warn("  pyth: no update data"); return; }
-    const fee = await pub.readContract({ address: PYTH, abi: pythAbi, functionName: "getUpdateFee", args: [updateData] });
-    await send("pyth", PYTH, pythAbi, "updatePriceFeeds", [updateData], fee);
 }
 
 async function scanEvents(state) {
@@ -188,11 +195,18 @@ async function runSelfRepay(state) {
         { proto: "nest", params: NEST, id: NEST_ID, tokens: state.nestTokens },
         { proto: "kit", params: KIT, id: KIT_ID, tokens: state.kitTokens }
     ];
+    const now = Math.floor(Date.now() / 1000);
     for (const { proto, params, id, tokens } of todo) {
         for (const tid of tokens) {
             const pos = await pub.readContract({ address: CORE, abi: lendingCoreAbi, functionName: "position", args: [id, BigInt(tid)] }).catch(() => null);
             if (!pos || pos[1] === 0n) continue; // no debt -> skip (engine would revert NoDebt)
-            await send(`selfRepay ${proto}:${tid}`, ENGINE, selfRepayEngineAbi, "selfRepay", [params, BigInt(tid), swaps]);
+            const key = `${proto}:${tid}`;
+            // Throttle: voting fees distribute per-epoch, so self-repaying (and pushing Pyth) more than
+            // once every SELF_REPAY_INTERVAL is wasted gas. THIS keeps the keeper cheap with live debt.
+            if (now - (state.lastSelfRepay[key] || 0) < SELF_REPAY_INTERVAL) continue;
+            if (!(await ensurePyth())) continue; // engine's minOut floor needs a fresh oracle price
+            const ok = await send(`selfRepay ${proto}:${tid}`, ENGINE, selfRepayEngineAbi, "selfRepay", [params, BigInt(tid), swaps]);
+            if (ok) state.lastSelfRepay[key] = now;
         }
     }
 }
@@ -215,6 +229,7 @@ async function watchLiquidations(state) {
         const healthy = await pub.readContract({ address: MARKET, abi: marketAbi, functionName: "isHealthy", args: [borrower] }).catch(() => true);
         if (healthy || pos[0] === 0n) continue;
         console.log(`  UNHEALTHY ${borrower} collateral=${pos[0]} — liquidating`);
+        await ensurePyth(); // fresh oracle price before seizing
         await send(`liquidate ${borrower}`, MARKET, marketAbi, "liquidate", [borrower, pos[0]]); // seize up to all collateral
     }
     state.marketBorrowers = alive;
@@ -222,10 +237,10 @@ async function watchLiquidations(state) {
 
 async function tick() {
     const state = loadState();
+    pythDoneThisTick = false; // Pyth pushed on-demand within jobs (self-repay / liquidation), max once per tick
     console.log(`[${new Date().toISOString()}] keeper=${KEEPER} dry=${DRY} block-from=${state.lastBlock}`);
     for (const [name, fn] of [
         ["scanEvents", () => scanEvents(state)],
-        ["pushPyth", () => pushPyth(state)],
         ["revoteDeposits", () => revoteDeposits(state)],
         ["runSelfRepay", () => runSelfRepay(state)],
         ["harvestCollatRewards", () => harvestCollatRewards()],
