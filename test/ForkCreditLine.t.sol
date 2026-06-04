@@ -30,7 +30,7 @@ contract ForkCreditLineTest is Test {
     MarketParams params;
 
     function setUp() public {
-        vm.createSelectFork(vm.rpcUrl("hyperevm"), 36_732_445);
+        vm.createSelectFork(vm.rpcUrl("hyperevm"), 36_930_600);
 
         address[] memory t = new address[](4);
         bytes32[] memory f = new bytes32[](4);

@@ -17,6 +17,7 @@ contract LenderVault is ERC4626 {
 
     LendingCore public immutable core;
     address internal immutable _asset;
+    uint8 internal immutable _assetDecimals;
     string internal _name;
     string internal _symbol;
 
@@ -30,6 +31,8 @@ contract LenderVault is ERC4626 {
     constructor(address _core, MarketParams memory p, string memory name_, string memory symbol_) {
         core = LendingCore(_core);
         _asset = p.loanToken;
+        (bool ok, uint8 d) = _tryGetAssetDecimals(p.loanToken);
+        _assetDecimals = ok ? d : 18;
         _loanToken = p.loanToken;
         _veAdapter = p.veAdapter;
         _oracle = p.oracle;
@@ -52,6 +55,12 @@ contract LenderVault is ERC4626 {
 
     function asset() public view override returns (address) {
         return _asset;
+    }
+
+    /// @dev Report the underlying's real decimals so `decimals()` isn't a misleading 18 over a
+    ///      6-decimal USDC underlying (composability hazard for integrators normalizing balances).
+    function _underlyingDecimals() internal view override returns (uint8) {
+        return _assetDecimals;
     }
 
     function name() public view override returns (string memory) {

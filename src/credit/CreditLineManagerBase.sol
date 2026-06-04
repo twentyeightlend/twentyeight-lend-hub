@@ -76,6 +76,13 @@ abstract contract CreditLineManagerBase is ICreditLineManager {
         return pricedTokens.length;
     }
 
+    /// @dev External wrapper so callers can try/catch Pyth reverts (stale/wide confidence).
+    ///      Self-call (`this.priceUsd1e18External`) is the only way to recover from a library
+    ///      revert without aborting the whole credit-line read.
+    function priceUsd1e18External(bytes32 feed) external view returns (uint256) {
+        return PythPriceLib.priceUsd1e18(pyth, feed, maxAge, maxConfBps);
+    }
+
     /// @inheritdoc ICreditLineManager
     function creditLine(MarketParams calldata, uint256 tokenId) external view returns (uint256) {
         uint256 minWeeklyUsd = _minWeeklyFeeUsd1e18(tokenId); // 1e18 USD
@@ -93,7 +100,16 @@ abstract contract CreditLineManagerBase is ICreditLineManager {
         if (rawAmount == 0) return 0;
         bytes32 feed = feedOf[token];
         if (feed == bytes32(0)) return 0; // excluded
-        uint256 px = PythPriceLib.priceUsd1e18(pyth, feed, maxAge, maxConfBps);
+        // A momentarily stale / wide-confidence feed must EXCLUDE the token (price 0), not revert
+        // the whole credit read — matching the unmapped-token invariant. Only the loanToken feed
+        // (in {creditLine}) stays strict, since a bad loan price should block borrowing outright.
+        uint256 px;
+        try this.priceUsd1e18External(feed) returns (uint256 p) {
+            px = p;
+        } catch {
+            return 0;
+        }
+        if (px == 0) return 0;
         uint256 dec = IDecimals(token).decimals();
         return (rawAmount * px) / (10 ** dec);
     }

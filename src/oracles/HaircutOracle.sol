@@ -41,6 +41,11 @@ contract HaircutOracle is IOracle {
         uint256 _maxConfBps
     ) {
         if (_dlomBps >= BPS || _collateralDecimals > 36 || _loanDecimals > 36) revert BadConfig();
+        // Pyth config parity: maxAge==0 bricks price(); maxConfBps>BPS disables the conf guard.
+        if (
+            _maxAge == 0 || _maxConfBps > BPS || _pyth == address(0) || _loanUsdFeed == bytes32(0)
+                || _nestOracle == address(0)
+        ) revert BadConfig();
         nestOracle = IVeTwapOracle(_nestOracle);
         pyth = IPyth(_pyth);
         loanUsdFeed = _loanUsdFeed;

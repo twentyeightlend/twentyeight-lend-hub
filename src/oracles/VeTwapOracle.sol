@@ -74,6 +74,11 @@ contract VeTwapOracle {
     ) {
         if (_twapWindow < MIN_TWAP_WINDOW || _maxTickDeviation <= 0 || _pool == address(0)) revert BadConfig();
         if (_tokenDecimals > 18 || _quoteDecimals > 18) revert BadConfig(); // 10**dec must fit uint128 baseAmount
+        // Pyth config parity with CreditLineManagerBase: maxAge==0 would make getPriceNoOlderThan
+        // always revert (bricking price()); maxConfBps>BPS would disable the confidence guard.
+        if (_maxAge == 0 || _maxConfBps > 10_000 || _pyth == address(0) || _quoteUsdFeed == bytes32(0)) {
+            revert BadConfig();
+        }
         pool = IAlgebraPool(_pool);
         // token/quote MUST be this pool's pair, else getQuoteAtTick silently inverts the price.
         address t0 = IAlgebraPool(_pool).token0();

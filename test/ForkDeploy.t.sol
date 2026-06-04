@@ -78,7 +78,7 @@ contract ForkDeployTest is Test {
     address me = address(this); // acts as multisig/guardian/keeper in the test
 
     function setUp() public {
-        vm.createSelectFork(vm.rpcUrl("hyperevm"), 36_743_140);
+        vm.createSelectFork(vm.rpcUrl("hyperevm"), 36_930_600);
 
         (address[] memory toks, bytes32[] memory feeds) = _priced();
 

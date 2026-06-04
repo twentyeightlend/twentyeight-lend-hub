@@ -62,6 +62,24 @@ contract VeTwapOracleTest is Test {
         o.priceUsd1e18();
     }
 
+    function test_constructor_rejectsZeroMaxAge() public {
+        // Audit L6: maxAge==0 would make getPriceNoOlderThan always revert (bricking price()).
+        MockAlgebraPool pool = new MockAlgebraPool(address(plugin), tokenLow, quote);
+        vm.expectRevert(VeTwapOracle.BadConfig.selector);
+        new VeTwapOracle(
+            address(pool), tokenLow, quote, 18, 18, address(pyth), WHYPE_FEED, WINDOW, 5000, 0, 5000
+        );
+    }
+
+    function test_constructor_rejectsWideMaxConf() public {
+        // Audit L6: maxConfBps > BPS disables the confidence guard.
+        MockAlgebraPool pool = new MockAlgebraPool(address(plugin), tokenLow, quote);
+        vm.expectRevert(VeTwapOracle.BadConfig.selector);
+        new VeTwapOracle(
+            address(pool), tokenLow, quote, 18, 18, address(pyth), WHYPE_FEED, WINDOW, 5000, 1 days, 10_001
+        );
+    }
+
     function test_constructor_rejectsMismatchedTokens() public {
         // pool pair is (tokenLow, quote); deploying with tokenHigh (not in the pool) must revert
         // to prevent a silently-inverted price.

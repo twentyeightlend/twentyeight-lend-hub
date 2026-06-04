@@ -77,6 +77,13 @@ contract WrappedCollateralMarket is ReentrancyGuard {
     mapping(address => uint256) public rewardPerCollatStored; // 1e18-scaled per collateral unit
     mapping(address => mapping(address => uint256)) public collatRewardPaid;
     mapping(address => mapping(address => uint256)) public collatRewardAccrued;
+    // Synthetix-style STREAMING (not instant) so a harvested lump is recognised linearly over
+    // REWARD_DURATION. This defeats a flash-deposit sandwich: a single-block depositor can capture
+    // at most one block's worth of a stream, never the whole pending reward over current collateral.
+    uint256 internal constant REWARD_DURATION = 7 days; // matches the weekly voting-fee epoch
+    mapping(address => uint256) public rewardRate; // reward-token units per second
+    mapping(address => uint256) public periodFinish; // timestamp the current stream ends
+    mapping(address => uint256) public lastCollatUpdate; // last time the global accumulator advanced
 
     event Supply(address indexed onBehalf, uint256 assets, uint256 shares);
     event Withdraw(address indexed onBehalf, address receiver, uint256 assets, uint256 shares);
@@ -339,8 +346,10 @@ contract WrappedCollateralMarket is ReentrancyGuard {
     // Collateral voting-yield forwarding to borrowers
     // ---------------------------------------------------------------------
 
-    /// @notice Pull this market's accrued wveNEST voting rewards and distribute them pro-rata to
-    ///         borrowers by collateral. Permissionless (keeper-poked).
+    /// @notice Pull this market's accrued wveNEST voting rewards and START/REFRESH a linear stream
+    ///         of each over REWARD_DURATION to borrowers (pro-rata by collateral). Permissionless
+    ///         (keeper-poked). Streaming (vs an instant lump) is what neutralises the flash-deposit
+    ///         sandwich — a depositor present for one block earns ~one block of the stream.
     function harvestCollateralRewards() external nonReentrant {
         uint256 n = collatRewardTokens.length;
         if (n == 0 || totalCollateral == 0) return;
@@ -353,7 +362,13 @@ contract WrappedCollateralMarket is ReentrancyGuard {
             address t = collatRewardTokens[i];
             uint256 cur = SafeTransferLib.balanceOf(t, address(this));
             uint256 gained = cur > before[i] ? cur - before[i] : 0;
-            if (gained != 0) rewardPerCollatStored[t] += (gained * WAD) / totalCollateral;
+            _accrueCollat(t); // settle the existing stream up to now BEFORE changing the rate
+            if (gained == 0) continue;
+            uint256 pf = periodFinish[t];
+            uint256 leftover = block.timestamp < pf ? (pf - block.timestamp) * rewardRate[t] : 0;
+            rewardRate[t] = (gained + leftover) / REWARD_DURATION;
+            periodFinish[t] = block.timestamp + REWARD_DURATION;
+            lastCollatUpdate[t] = block.timestamp;
         }
     }
 
@@ -372,8 +387,28 @@ contract WrappedCollateralMarket is ReentrancyGuard {
     }
 
     function earnedCollateralReward(address user, address token) external view returns (uint256) {
-        uint256 delta = rewardPerCollatStored[token] - collatRewardPaid[user][token];
+        uint256 delta = _rewardPerCollat(token) - collatRewardPaid[user][token];
         return collatRewardAccrued[user][token] + (position[user].collateral * delta) / WAD;
+    }
+
+    /// @dev Live reward-per-collateral incl. the portion streamed since the last checkpoint.
+    function _rewardPerCollat(address t) internal view returns (uint256) {
+        uint256 stored = rewardPerCollatStored[t];
+        uint256 tc = totalCollateral;
+        if (tc == 0) return stored;
+        uint256 last = lastCollatUpdate[t];
+        uint256 pf = periodFinish[t];
+        uint256 applicable = block.timestamp < pf ? block.timestamp : pf;
+        if (applicable <= last) return stored;
+        return stored + (rewardRate[t] * (applicable - last) * WAD) / tc;
+    }
+
+    /// @dev Advance the global accumulator for one reward token to now.
+    function _accrueCollat(address t) internal {
+        rewardPerCollatStored[t] = _rewardPerCollat(t);
+        // Setting to block.timestamp is safe: _rewardPerCollat caps `applicable` at periodFinish,
+        // so time past the stream's end contributes nothing on the next call.
+        lastCollatUpdate[t] = block.timestamp;
     }
 
     function _updateCollatRewards(address user) internal {
@@ -381,6 +416,7 @@ contract WrappedCollateralMarket is ReentrancyGuard {
         uint256 n = collatRewardTokens.length;
         for (uint256 i; i < n; ++i) {
             address t = collatRewardTokens[i];
+            _accrueCollat(t); // advance the stream before settling this user
             uint256 rpt = rewardPerCollatStored[t];
             collatRewardAccrued[user][t] += (c * (rpt - collatRewardPaid[user][t])) / WAD;
             collatRewardPaid[user][t] = rpt;

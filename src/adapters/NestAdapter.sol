@@ -78,6 +78,7 @@ contract NestAdapter is IVeAdapter {
 
     error OnlyCore();
     error OnlyGuardian();
+    error OnlySelf();
     error NotOwnedByAdapter();
 
     event Paused();
@@ -282,7 +283,15 @@ contract NestAdapter is IVeAdapter {
             before[i] = uniq[i].balanceOf(address(this));
         }
 
-        if (bribes.length != 0) voter.claimBribes(bribes, tokens, tokenId); // claims to this adapter
+        // Claim each bribe in isolation: a hostile/reverting reward token in one voted gauge must
+        // not brick the whole claim (and thus the position's self-repay).
+        for (uint256 i; i < bribes.length; ++i) {
+            address[] memory oneB = new address[](1);
+            address[][] memory oneT = new address[][](1);
+            oneB[0] = bribes[i];
+            oneT[0] = tokens[i];
+            try voter.claimBribes(oneB, oneT, tokenId) {} catch {}
+        }
 
         outTokens = new address[](u);
         outAmounts = new uint256[](u);
@@ -291,9 +300,28 @@ contract NestAdapter is IVeAdapter {
             uint256 cur = t.balanceOf(address(this));
             uint256 gained = cur > before[i] ? cur - before[i] : 0; // never underflow on weird tokens
             outTokens[i] = t;
-            outAmounts[i] = gained;
-            if (gained != 0) t.safeTransfer(to, gained);
+            // Sweep in try/catch: a reward token that reverts on transfer-out is left in the adapter
+            // (guardian-rescuable) instead of bricking harvest. outAmounts[] reflects only what was
+            // actually forwarded to `to`.
+            if (gained != 0) {
+                try this.sweepReward(t, to, gained) {
+                    outAmounts[i] = gained;
+                } catch {}
+            }
         }
+    }
+
+    /// @dev Self-only external sweep so {harvest} can isolate a reverting reward-token transfer.
+    function sweepReward(address token, address to, uint256 amount) external {
+        if (msg.sender != address(this)) revert OnlySelf();
+        token.safeTransfer(to, amount);
+    }
+
+    /// @notice Guardian rescue for reward tokens stranded by a failed sweep or a malicious token.
+    ///         Cannot touch custodied veNFTs (ERC721, recovered only via {recoverUnderlying}).
+    function rescueERC20(address token, address to, uint256 amount) external {
+        if (msg.sender != guardian) revert OnlyGuardian();
+        token.safeTransfer(to, amount);
     }
 
     /// @param voteData abi.encode(address[] poolsVotes, uint256[] weights).

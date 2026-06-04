@@ -89,7 +89,11 @@ contract NestCreditLineManager is CreditLineManagerBase {
         // Resolve the internal-fee bribe for each currently-voted pool once.
         address[] memory bribes = new address[](nVotes);
         for (uint256 i; i < nVotes; ++i) {
-            (,, address intB,,,,,) = voter.gaugesState(voter.poolToGauge(voter.poolVote(tokenId, i)));
+            // Guard a killed/stale gauge (poolToGauge==0) — gaugesState(address(0)) can revert and
+            // would brick the whole credit read. Mirrors the guard in NestAdapter/ReceiptWrapper.
+            address gauge = voter.poolToGauge(voter.poolVote(tokenId, i));
+            if (gauge == address(0)) continue; // bribes[i] stays address(0) -> skipped below
+            (,, address intB,,,,,) = voter.gaugesState(gauge);
             bribes[i] = intB;
         }
 

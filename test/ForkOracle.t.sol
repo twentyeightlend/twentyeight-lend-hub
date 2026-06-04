@@ -17,7 +17,7 @@ contract ForkOracleTest is Test {
     bytes32 constant HYPE_FEED = 0x4279e31cc369bbcc2faf022b382b080e32a8e689ff20fbc530d2a603eb6cd98b;
 
     function setUp() public {
-        vm.createSelectFork(vm.rpcUrl("hyperevm"), 36_736_611);
+        vm.createSelectFork(vm.rpcUrl("hyperevm"), 36_930_600);
     }
 
     function test_fork_nestPrice() public {

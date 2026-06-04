@@ -53,10 +53,13 @@ contract SelfRepayEngine is ReentrancyGuard {
     }
 
     event SelfRepay(Id indexed id, uint256 indexed tokenId, uint256 repaid, uint256 treasuryCut, uint256 refund);
+    event FeedSet(address indexed token, bytes32 feed);
+    event Rescued(address indexed token, address indexed to, uint256 amount);
 
     error TooLowOutput();
     error BadConfig();
     error NoDebt();
+    error OnlyTreasury();
 
     constructor(
         address _core,
@@ -101,13 +104,18 @@ contract SelfRepayEngine is ReentrancyGuard {
         // (a donation or leftover dust must not be misrouted).
         uint256 startBal = loanToken.balanceOf(address(this));
 
-        (address[] memory tokens,) = core.harvestFor(params, tokenId);
+        (address[] memory tokens, uint256[] memory amts) = core.harvestFor(params, tokenId);
 
         for (uint256 i; i < tokens.length; ++i) {
             address t = tokens[i];
             if (t == loanToken) continue;
-            uint256 bal = t.balanceOf(address(this));
+            // Swap only THIS harvest's delta (the amount the adapter just forwarded), not the full
+            // live balance — so a donated/previously-stranded balance of a priced token isn't
+            // folded into this position's repay/refund/treasury.
+            uint256 bal = amts[i];
             if (bal == 0) continue;
+            uint256 onHand = t.balanceOf(address(this));
+            if (bal > onHand) bal = onHand; // never approve/swap more than actually held
             // Only swap tokens we can price: an unpriced token has no oracle floor, so a
             // permissionless caller could set minOut=0 and sandwich it. Skip it (it stays in the
             // engine for a guardian to handle) — never swap without oracle protection.
@@ -145,6 +153,24 @@ contract SelfRepayEngine is ReentrancyGuard {
         loanToken.safeApprove(address(core), 0);
 
         emit SelfRepay(id, tokenId, toRepay - refund, treasuryCut, refund);
+    }
+
+    // --- admin (treasury = protocol multisig) ---
+
+    /// @notice Price a newly-discovered reward token so it becomes swappable (gets an oracle floor)
+    ///         instead of stranding. Governed by the treasury multisig.
+    function setFeed(address token, bytes32 feed) external {
+        if (msg.sender != treasury) revert OnlyTreasury();
+        feedOf[token] = feed;
+        emit FeedSet(token, feed);
+    }
+
+    /// @notice Rescue reward tokens stranded in the engine (unpriced/skipped, or donations) to the
+    ///         treasury for manual handling. nonReentrant so it can't run inside a {selfRepay}.
+    function rescue(address token, address to, uint256 amount) external nonReentrant {
+        if (msg.sender != treasury) revert OnlyTreasury();
+        token.safeTransfer(to, amount);
+        emit Rescued(token, to, amount);
     }
 
     /// @dev Oracle-implied minimum output for swapping `amountIn` of `tokenIn` into

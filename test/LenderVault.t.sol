@@ -47,6 +47,12 @@ contract LenderVaultTest is Test {
         usdc.approve(address(vault), type(uint256).max);
     }
 
+    function test_decimals_matchUnderlying() public view {
+        // Audit L7: the share token must report the underlying's real decimals (6 for USDC),
+        // not a misleading default of 18, to avoid 1e12 normalization errors in integrators.
+        assertEq(vault.decimals(), 6);
+    }
+
     function test_deposit_routesToCore() public {
         vm.prank(alice);
         uint256 shares = vault.deposit(500e6, alice);

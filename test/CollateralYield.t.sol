@@ -91,25 +91,45 @@ contract CollateralYieldTest is Test {
     }
 
     function test_yield_proRataAndClaim() public {
-        mkt.harvestCollateralRewards(); // market claims 100 reward, distributes by collateral
-
-        assertEq(mkt.earnedCollateralReward(alice, address(reward)), 80e18, "alice 80%");
-        assertEq(mkt.earnedCollateralReward(bob, address(reward)), 20e18, "bob 20%");
+        mkt.harvestCollateralRewards(); // market claims 100 reward, STREAMS over REWARD_DURATION
+        // nothing earned instantly any more (streaming defeats flash-sandwich)
+        assertEq(mkt.earnedCollateralReward(alice, address(reward)), 0, "no instant lump");
+        // after the full stream, the 100 is split pro-rata (minus rounding dust)
+        vm.warp(block.timestamp + 7 days);
+        assertApproxEqAbs(mkt.earnedCollateralReward(alice, address(reward)), 80e18, 1e9, "alice ~80%");
+        assertApproxEqAbs(mkt.earnedCollateralReward(bob, address(reward)), 20e18, 1e9, "bob ~20%");
 
         vm.prank(alice);
         mkt.claimCollateralRewards();
-        assertEq(reward.balanceOf(alice), 80e18);
+        assertApproxEqAbs(reward.balanceOf(alice), 80e18, 1e9);
         assertEq(mkt.earnedCollateralReward(alice, address(reward)), 0);
     }
 
     function test_yield_checkpointOnWithdraw() public {
-        mkt.harvestCollateralRewards(); // alice accrues 80
-        // bob's collateral changes (withdraw) -> his 20 must be checkpointed, not lost
+        mkt.harvestCollateralRewards();
+        vm.warp(block.timestamp + 7 days); // let the stream complete; alice~80, bob~20
+        // bob's collateral changes (withdraw) -> his ~20 must be checkpointed, not lost
         vm.prank(bob);
         mkt.withdrawCollateral(100e18, bob);
         vm.prank(bob);
         mkt.claimCollateralRewards();
-        assertEq(reward.balanceOf(bob), 20e18, "bob keeps pre-withdraw rewards");
+        assertApproxEqAbs(reward.balanceOf(bob), 20e18, 1e9, "bob keeps pre-withdraw rewards");
+    }
+
+    /// @notice The M1 fix: a flash depositor who deposits, harvests, and exits in one block can no
+    ///         longer steal borrowers' accrued voting yield — streaming caps them to ~one block.
+    function test_yield_streamingBlocksFlashSandwich() public {
+        address attacker = address(0xA);
+        // attacker flash-deposits a huge collateral stake, then triggers the harvest
+        _supply(attacker, 100_000e18); // dwarfs alice+bob's 500
+        mkt.harvestCollateralRewards();
+        // same block: attacker immediately tries to claim the lump
+        uint256 stolen = mkt.earnedCollateralReward(attacker, address(reward));
+        assertEq(stolen, 0, "attacker captures nothing instantly");
+        // even one block later, the attacker only gets a stream sliver, not the whole 100
+        vm.warp(block.timestamp + 12);
+        uint256 sliver = mkt.earnedCollateralReward(attacker, address(reward));
+        assertLt(sliver, 1e18, "attacker gets at most a tiny stream slice, not the lump");
     }
 
     function test_yield_newDepositorNoRetroactive() public {

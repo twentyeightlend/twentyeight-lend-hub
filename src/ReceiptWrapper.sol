@@ -98,6 +98,8 @@ contract ReceiptWrapper is ERC20, ReentrancyGuard {
     error NotTransferable();
     error NotOwner();
     error EmptyLock();
+    error OnlySelf();
+    error SelfTransfer();
 
     constructor(address _ve, address _voter, address _underlying, address _guardian, address _keeper, address _yieldReceiver) {
         ve = IWrapVe(_ve);
@@ -235,19 +237,39 @@ contract ReceiptWrapper is ERC20, ReentrancyGuard {
 
     // --- reward claiming ---
 
-    /// @notice Settle and transfer all of `msg.sender`'s accrued rewards.
+    /// @notice Settle and transfer all of `msg.sender`'s accrued rewards. Resilient: one
+    ///         misbehaving (blacklisting/paused) reward token can no longer brick the others —
+    ///         it's skipped and its accrual restored for a later {claimToken}.
     function claim() external nonReentrant {
         _updateAccount(msg.sender);
         uint256 n = rewardTokens.length;
         for (uint256 i; i < n; ++i) {
-            address t = rewardTokens[i];
-            uint256 owed = rewardsAccrued[msg.sender][t];
-            if (owed != 0) {
-                rewardsAccrued[msg.sender][t] = 0;
-                t.safeTransfer(msg.sender, owed);
-                emit Claimed(msg.sender, t, owed);
-            }
+            _claimOne(rewardTokens[i]);
         }
+    }
+
+    /// @notice Claim a SINGLE reward token — escape hatch so a holder can still extract the good
+    ///         tokens when one allowlisted token is blocking the batch {claim}.
+    function claimToken(address token) external nonReentrant {
+        _updateAccount(msg.sender);
+        _claimOne(token);
+    }
+
+    function _claimOne(address t) internal {
+        uint256 owed = rewardsAccrued[msg.sender][t];
+        if (owed == 0) return;
+        rewardsAccrued[msg.sender][t] = 0;
+        try this.sweepReward(t, msg.sender, owed) {
+            emit Claimed(msg.sender, t, owed);
+        } catch {
+            rewardsAccrued[msg.sender][t] = owed; // transiently blocked: restore, don't lose it
+        }
+    }
+
+    /// @dev Self-only external transfer so {claim}/{claimToken} can isolate a reverting token.
+    function sweepReward(address token, address to, uint256 amount) external {
+        if (msg.sender != address(this)) revert OnlySelf();
+        token.safeTransfer(to, amount);
     }
 
     /// @notice Total rewards of `token` claimable by `account` (settled + pending).
@@ -267,8 +289,12 @@ contract ReceiptWrapper is ERC20, ReentrancyGuard {
         }
     }
 
-    /// @dev Checkpoint reward accounting before any balance change (mint/transfer/burn).
+    /// @dev Checkpoint reward accounting before any balance change (mint/transfer/burn). Also
+    ///      blocks transfers to this contract: self-held wveNEST would sit in the distribution
+    ///      denominator (totalSupply) yet never claim, silently stranding a pro-rata slice of
+    ///      every future harvest.
     function _beforeTokenTransfer(address from, address to, uint256) internal override {
+        if (to == address(this)) revert SelfTransfer();
         if (from != address(0)) _updateAccount(from);
         if (to != address(0)) _updateAccount(to);
     }

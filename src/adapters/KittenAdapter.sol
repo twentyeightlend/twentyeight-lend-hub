@@ -58,6 +58,7 @@ contract KittenAdapter is IVeAdapter {
 
     error OnlyCore();
     error OnlyGuardian();
+    error OnlySelf();
     error NotOwnedByAdapter();
 
     event Paused();
@@ -160,19 +161,34 @@ contract KittenAdapter is IVeAdapter {
         address[] memory vrs = _votedVotingRewards(tokenId);
         uint256 period = voter.getCurrentPeriod();
         uint256 src = period == 0 ? 0 : period - 1;
-        // Flatten: cap total token slots.
-        address[] memory tBuf = new address[](vrs.length * 4);
-        uint256[] memory aBuf = new uint256[](vrs.length * 4);
+        // Size by the ACTUAL summed reward-token count (a fixed multiple silently truncates), and
+        // dedup-sum a token earned across multiple voted gauges.
+        uint256 slots;
+        for (uint256 i; i < vrs.length; ++i) {
+            if (vrs[i] != address(0)) slots += IKittenVotingReward(vrs[i]).getRewardList().length;
+        }
+        address[] memory tBuf = new address[](slots);
+        uint256[] memory aBuf = new uint256[](slots);
         uint256 k;
         for (uint256 i; i < vrs.length; ++i) {
             if (vrs[i] == address(0)) continue;
             address[] memory rl = IKittenVotingReward(vrs[i]).getRewardList();
-            for (uint256 j; j < rl.length && k < tBuf.length; ++j) {
+            for (uint256 j; j < rl.length; ++j) {
                 uint256 e = IKittenVotingReward(vrs[i]).earnedForPeriod(src, tokenId, rl[j]);
                 if (e == 0) continue;
-                tBuf[k] = rl[j];
-                aBuf[k] = e;
-                ++k;
+                bool seen;
+                for (uint256 x; x < k; ++x) {
+                    if (tBuf[x] == rl[j]) {
+                        aBuf[x] += e;
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen) {
+                    tBuf[k] = rl[j];
+                    aBuf[k] = e;
+                    ++k;
+                }
             }
         }
         tokens = new address[](k);
@@ -189,8 +205,15 @@ contract KittenAdapter is IVeAdapter {
         returns (address[] memory tokens, uint256[] memory amounts)
     {
         address[] memory vrs = _votedVotingRewards(tokenId);
-        // Collect unique reward tokens before claiming so we can sweep deltas.
-        address[] memory uniq = new address[](vrs.length * 4);
+        // Collect unique reward tokens before claiming so we can sweep deltas. Size by the ACTUAL
+        // summed reward-token count: claimVotingRewardBatch pulls EVERY token in each gauge's
+        // getRewardList(), so a fixed `vrs.length*4` would silently DROP and permanently strand
+        // tokens beyond the buffer (matches the NestAdapter sizing + its warning).
+        uint256 slots;
+        for (uint256 i; i < vrs.length; ++i) {
+            if (vrs[i] != address(0)) slots += IKittenVotingReward(vrs[i]).getRewardList().length;
+        }
+        address[] memory uniq = new address[](slots);
         uint256 u;
         for (uint256 i; i < vrs.length; ++i) {
             if (vrs[i] == address(0)) continue;
@@ -203,7 +226,7 @@ contract KittenAdapter is IVeAdapter {
                         break;
                     }
                 }
-                if (!seen && u < uniq.length) uniq[u++] = rl[j];
+                if (!seen) uniq[u++] = rl[j];
             }
         }
 
@@ -214,7 +237,14 @@ contract KittenAdapter is IVeAdapter {
             before[i] = uniq[i].balanceOf(address(this));
         }
 
-        voter.claimVotingRewardBatch(vrs, tokenId); // claims to this adapter (the veNFT owner)
+        // Claim each votingReward in isolation: one hostile/reverting reward token in a gauge the
+        // borrower voted must not brick the whole harvest (and thus the position's self-repay).
+        for (uint256 i; i < vrs.length; ++i) {
+            if (vrs[i] == address(0)) continue;
+            address[] memory one = new address[](1);
+            one[0] = vrs[i];
+            try voter.claimVotingRewardBatch(one, tokenId) {} catch {}
+        }
 
         tokens = new address[](u);
         amounts = new uint256[](u);
@@ -223,9 +253,28 @@ contract KittenAdapter is IVeAdapter {
             uint256 cur = t.balanceOf(address(this));
             uint256 gained = cur > before[i] ? cur - before[i] : 0; // never underflow on weird tokens
             tokens[i] = t;
-            amounts[i] = gained;
-            if (gained != 0) t.safeTransfer(to, gained);
+            // Sweep in a try/catch: a reward token that reverts on transfer-out is left in the
+            // adapter (rescuable by the guardian) instead of bricking harvest. amounts[] reflects
+            // only what was actually forwarded to `to`.
+            if (gained != 0) {
+                try this.sweepReward(t, to, gained) {
+                    amounts[i] = gained;
+                } catch {}
+            }
         }
+    }
+
+    /// @dev Self-only external sweep so {harvest} can isolate a reverting reward-token transfer.
+    function sweepReward(address token, address to, uint256 amount) external {
+        if (msg.sender != address(this)) revert OnlySelf();
+        token.safeTransfer(to, amount);
+    }
+
+    /// @notice Guardian rescue for reward tokens stranded by a failed sweep or a malicious token.
+    ///         Cannot touch custodied veNFTs (ERC721, recovered only via {recoverUnderlying}).
+    function rescueERC20(address token, address to, uint256 amount) external {
+        if (msg.sender != guardian) revert OnlyGuardian();
+        token.safeTransfer(to, amount);
     }
 
     /// @param voteData abi.encode(address[] poolList, uint256[] weightList).

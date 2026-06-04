@@ -6,6 +6,19 @@ import {ReceiptWrapper} from "../src/ReceiptWrapper.sol";
 import {MockERC20} from "./mocks/Mocks.sol";
 import {MockWrapVe, MockWrapVoter, MockWrapBribe} from "./mocks/WrapperMocks.sol";
 
+/// @dev Reward token that mints fine but reverts on transfer (blacklist/pause simulation).
+contract BlacklistERC20 {
+    mapping(address => uint256) public balanceOf;
+
+    function mint(address to, uint256 a) external {
+        balanceOf[to] += a;
+    }
+
+    function transfer(address, uint256) external pure returns (bool) {
+        revert("blacklisted");
+    }
+}
+
 contract ReceiptWrapperTest is Test {
     ReceiptWrapper w;
     MockWrapVe ve;
@@ -208,5 +221,45 @@ contract ReceiptWrapperTest is Test {
         w.harvest(); // another 100 split 200:200
         assertEq(w.earned(alice, address(reward)), 150e18);
         assertEq(w.earned(bob, address(reward)), 50e18);
+    }
+
+    /// @notice Audit L2: wveNEST sent to the wrapper itself would sit in the distribution
+    ///         denominator forever; the transfer must be rejected.
+    function test_transferToSelf_reverts() public {
+        ve.mintLock(1, alice, 400e18, true);
+        vm.prank(alice);
+        w.deposit(1);
+        vm.prank(alice);
+        vm.expectRevert(ReceiptWrapper.SelfTransfer.selector);
+        w.transfer(address(w), 1e18);
+    }
+
+    /// @notice Audit L1: one blacklisting/paused allowlisted reward token must NOT brick claims of
+    ///         the others; its accrual is preserved and recoverable via claimToken later.
+    function test_claim_resilientToBlacklistingToken() public {
+        ve.mintLock(1, alice, 400e18, true);
+        vm.prank(alice);
+        w.deposit(1);
+
+        // good token: alice earns 100
+        _setupReward(100e18);
+        w.harvest();
+
+        // bad token (transfer reverts): allowlist + harvest so alice also accrues it
+        BlacklistERC20 bad = new BlacklistERC20();
+        voter.config(address(0xA), address(0x6A), address(new MockWrapBribe(address(bad))), address(bad), 50e18);
+        vm.prank(guardian);
+        w.addRewardToken(address(bad));
+        w.harvest();
+        assertEq(w.earned(alice, address(bad)), 50e18, "accrued the bad token");
+
+        // batch claim must not revert; good token paid, bad token accrual restored
+        vm.prank(alice);
+        w.claim();
+        assertEq(reward.balanceOf(alice), 100e18, "good token still claimable");
+        assertEq(w.earned(alice, address(bad)), 50e18, "bad token preserved, not lost");
+
+        // single-token escape hatch for the good token works independently
+        assertEq(w.earned(alice, address(reward)), 0, "good fully settled");
     }
 }
