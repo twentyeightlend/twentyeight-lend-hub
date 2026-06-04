@@ -14,6 +14,7 @@ import {
     MockNestVoter,
     MockNestBribe
 } from "./mocks/CreditMocks.sol";
+import {MockVeAdapter} from "./mocks/Mocks.sol";
 
 contract CreditLineTest is Test {
     bytes32 constant USDC_FEED = bytes32(uint256(1));
@@ -22,7 +23,8 @@ contract CreditLineTest is Test {
     MockPyth pyth;
     address whype; // 18 dec, $74
     address usdcReward; // 6 dec, $1
-    MarketParams params; // unused fields ok; manager ignores params
+    MockVeAdapter adapter; // params.veAdapter: maturity-match reads isPermanentLock()/lockEnd()
+    MarketParams params;
 
     uint256 constant WINDOW = 4;
     uint256 constant MULT = 8;
@@ -35,6 +37,9 @@ contract CreditLineTest is Test {
         pyth.setPrice(WHYPE_FEED, 74e8, 1e6, -8); // $74
         whype = address(new MockDecToken(18));
         usdcReward = address(new MockDecToken(6));
+        // default adapter: lockEnd = max => full multiplier, so existing expectations are unchanged.
+        adapter = new MockVeAdapter(address(0));
+        params.veAdapter = address(adapter);
     }
 
     function _tokens() internal view returns (address[] memory t, bytes32[] memory f) {
@@ -137,6 +142,82 @@ contract CreditLineTest is Test {
             IPyth(address(pyth)), address(voter), USDC_FEED, LOAN_DEC, WINDOW, MULT, SAFETY, 1 days, 5_000, t, f
         );
         assertEq(m.creditLine(params, 1), 0);
+    }
+
+    // ---------------------------------------------------------------------
+    // Maturity-matched credit horizon (KITTEN expiring locks)
+    // ---------------------------------------------------------------------
+
+    /// @dev KITTEN manager earning a flat $100/week over the window (full credit = 100*8*0.8 = $640).
+    function _kitten100() internal returns (KittenCreditLineManager m) {
+        MockKittenVoter voter = new MockKittenVoter();
+        MockKittenVotingReward vr = new MockKittenVotingReward();
+        address poolA = address(0xA);
+        voter.setPeriod(100);
+        address[] memory pools = new address[](1);
+        pools[0] = poolA;
+        voter.setPools(pools);
+        voter.setGauge(poolA, address(vr));
+        for (uint256 p = 96; p <= 99; ++p) {
+            vr.setEarned(p, usdcReward, 100e6); // $100/wk flat
+        }
+        (address[] memory t, bytes32[] memory f) = _tokens();
+        m = new KittenCreditLineManager(
+            IPyth(address(pyth)), address(voter), USDC_FEED, LOAN_DEC, WINDOW, MULT, SAFETY, 1 days, 5_000, t, f
+        );
+    }
+
+    function test_maturity_permanentLock_fullHorizon() public {
+        KittenCreditLineManager m = _kitten100();
+        adapter.setPermanent(true); // veNEST-style: never expires
+        assertApproxEqAbs(m.creditLine(params, 1), 640e6, 1e3, "permanent => full 8 epochs");
+    }
+
+    function test_maturity_longLock_fullHorizon() public {
+        KittenCreditLineManager m = _kitten100();
+        adapter.setPermanent(false);
+        adapter.setLockEnd(block.timestamp + 52 weeks); // far past the 8-epoch horizon
+        assertApproxEqAbs(m.creditLine(params, 1), 640e6, 1e3, "52wk lock => full 8 epochs");
+    }
+
+    function test_maturity_shortLock_capped() public {
+        KittenCreditLineManager m = _kitten100();
+        adapter.setPermanent(false);
+        adapter.setLockEnd(block.timestamp + 2 weeks); // only 2 epochs of life left
+        // min(8,2)=2 -> 100*2*0.8 = $160 (loan can self-repay before expiry)
+        assertApproxEqAbs(m.creditLine(params, 1), 160e6, 1e3, "near-expiry capped to remaining weeks");
+    }
+
+    function test_maturity_oneWeekLock_capped() public {
+        KittenCreditLineManager m = _kitten100();
+        adapter.setPermanent(false);
+        adapter.setLockEnd(block.timestamp + 1 weeks);
+        assertApproxEqAbs(m.creditLine(params, 1), 80e6, 1e3, "1wk => 1 epoch = $80");
+    }
+
+    function test_maturity_expiredLock_zeroCredit() public {
+        KittenCreditLineManager m = _kitten100();
+        vm.warp(100 weeks);
+        adapter.setPermanent(false);
+        adapter.setLockEnd(block.timestamp); // already expired
+        assertEq(m.creditLine(params, 1), 0, "expired lock => no credit");
+    }
+
+    /// @dev Across the whole lock-duration domain: credit is EXACTLY min(weeksLeft, multiplier)
+    ///      epochs of fees, never more than the full horizon, and never reverts.
+    function testFuzz_maturity_scalesAndBounded(uint256 secsLeft) public {
+        KittenCreditLineManager m = _kitten100();
+        adapter.setPermanent(false);
+        secsLeft = bound(secsLeft, 0, 520 weeks);
+        adapter.setLockEnd(block.timestamp + secsLeft);
+
+        uint256 weeksLeft = secsLeft / 1 weeks;
+        uint256 effMult = weeksLeft < MULT ? weeksLeft : MULT;
+        uint256 expected = effMult * 80e6; // $100/wk * effMult * 0.8 safety, in USDC(6) at $1
+
+        uint256 credit = m.creditLine(params, 1);
+        assertEq(credit, expected, "credit == min(weeksLeft,mult) epochs exactly");
+        assertLe(credit, 640e6, "never exceeds the full 8-epoch horizon");
     }
 
     // ---------------------------------------------------------------------

@@ -25,12 +25,19 @@ contract ForkCreditLineTest is Test {
     bytes32 constant USDT_FEED = 0x2b89b9dc8fdf9f34709a5b106b472f0f39bb6ca9ce04b0fd7f2e971688e2e53b;
     bytes32 constant ETH_FEED = 0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
 
+    // deployed adapters (read isPermanentLock()/lockEnd() for the maturity-matched horizon)
+    address constant NEST_ADAPTER = 0x63BA0cf6b4bf32A1c4E3C1C9076a5dadB7F216c1;
+    address constant KITTEN_ADAPTER = 0x295D025258E72dA9203F3aAA777Fe61B297af415;
+
     KittenCreditLineManager mgr;
     NestCreditLineManager nestMgr;
-    MarketParams params;
+    MarketParams nestParams;
+    MarketParams kittenParams;
 
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("hyperevm"), 36_930_600);
+        nestParams.veAdapter = NEST_ADAPTER; // permanent veNEST -> full horizon
+        kittenParams.veAdapter = KITTEN_ADAPTER; // long veKITTEN whale locks -> full horizon
 
         address[] memory t = new address[](4);
         bytes32[] memory f = new bytes32[](4);
@@ -54,8 +61,8 @@ contract ForkCreditLineTest is Test {
     }
 
     function test_fork_nest_realWhaleCreditLine() public view {
-        uint256 line2 = nestMgr.creditLine(params, 2);
-        uint256 line5 = nestMgr.creditLine(params, 5);
+        uint256 line2 = nestMgr.creditLine(nestParams, 2);
+        uint256 line5 = nestMgr.creditLine(nestParams, 5);
         console2.log("veNEST #2 credit line (USDC, 6dp):", line2);
         console2.log("veNEST #5 credit line (USDC, 6dp):", line5);
         assertGt(line2, 0, "veNEST #2 must have a nonzero on-chain credit line");
@@ -64,8 +71,8 @@ contract ForkCreditLineTest is Test {
 
     function test_fork_realWhaleCreditLine() public view {
         // veKITTEN #2 and #3 are active whale voters (Phase 0).
-        uint256 line2 = mgr.creditLine(params, 2);
-        uint256 line3 = mgr.creditLine(params, 3);
+        uint256 line2 = mgr.creditLine(kittenParams, 2);
+        uint256 line3 = mgr.creditLine(kittenParams, 3);
         console2.log("veKITTEN #2 credit line (USDC, 6dp):", line2);
         console2.log("veKITTEN #3 credit line (USDC, 6dp):", line3);
         assertGt(line2, 0, "whale #2 must have a nonzero on-chain credit line");

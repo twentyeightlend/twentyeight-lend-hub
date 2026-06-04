@@ -104,4 +104,21 @@ contract IntegrationTest is Test {
         (,, uint128 cached,) = core.position(id, TOKEN_ID);
         assertApproxEqAbs(uint256(cached), 640e6, 1e3);
     }
+
+    /// @notice End-to-end: a near-expiry (non-permanent) lock caps the on-chain BORROW, not just
+    ///         the view — the loan can never exceed what the lock can self-repay before expiry.
+    function test_borrow_cappedByMaturityMatch() public {
+        adapter.setPermanent(false);
+        adapter.setLockEnd(block.timestamp + 2 weeks); // only 2 epochs of life left
+        // full would be $640; maturity-match caps to 2/8 -> ~$160
+        assertApproxEqAbs(mgr.creditLine(params, TOKEN_ID), 160e6, 1e3, "maturity-capped line");
+        // drawing the old full $640 now exceeds the capped line
+        vm.prank(borrower);
+        vm.expectRevert(LendingCore.CreditLineExceeded.selector);
+        core.borrow(params, TOKEN_ID, 640e6, borrower);
+        // within the capped line succeeds
+        vm.prank(borrower);
+        core.borrow(params, TOKEN_ID, 160e6, borrower);
+        assertEq(usdc.balanceOf(borrower), 160e6);
+    }
 }

@@ -6,6 +6,7 @@ import {KittenCreditLineManager} from "../src/credit/KittenCreditLineManager.sol
 import {IPyth} from "../src/interfaces/IPyth.sol";
 import {MarketParams} from "../src/libraries/Types.sol";
 import {MockKittenVoter, MockKittenVotingReward, MockDecToken} from "./mocks/CreditMocks.sol";
+import {MockVeAdapter} from "./mocks/Mocks.sol";
 import {AdvPyth} from "./StressPyth.t.sol";
 
 /// @notice Offensive stress of the LIVE credit-line USD sizing. The credit numerator is REAL
@@ -55,7 +56,10 @@ contract StressCreditTest is Test {
         mgr = new KittenCreditLineManager(
             IPyth(address(pyth)), address(voter), USDC_FEED, 6, WINDOW, MULT, SAFETY, 600, 10_000, toks, feeds
         );
-        params = MarketParams(address(0xDEAD), address(0), address(0), address(0), 0);
+        // permanent adapter => full multiplier, so the formula tests are unaffected by maturity-match.
+        MockVeAdapter adapter = new MockVeAdapter(address(0));
+        adapter.setPermanent(true);
+        params = MarketParams(address(0xDEAD), address(adapter), address(0), address(0), 0);
     }
 
     function _earnEachPeriod(address token, uint256 g) internal {

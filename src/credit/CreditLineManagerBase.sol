@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {ICreditLineManager} from "../interfaces/ICreditLineManager.sol";
 import {IPyth} from "../interfaces/IPyth.sol";
+import {IVeAdapter} from "../interfaces/IVeAdapter.sol";
 import {PythPriceLib} from "../libraries/PythPriceLib.sol";
 import {MarketParams} from "../libraries/Types.sol";
 
@@ -84,15 +85,33 @@ abstract contract CreditLineManagerBase is ICreditLineManager {
     }
 
     /// @inheritdoc ICreditLineManager
-    function creditLine(MarketParams calldata, uint256 tokenId) external view returns (uint256) {
+    function creditLine(MarketParams calldata params, uint256 tokenId) external view returns (uint256) {
         uint256 minWeeklyUsd = _minWeeklyFeeUsd1e18(tokenId); // 1e18 USD
         if (minWeeklyUsd == 0) return 0;
 
-        uint256 grossUsd = (minWeeklyUsd * multiplier * safetyBps) / BPS; // 1e18 USD
+        // Maturity-match: a non-permanent (expiring) lock cannot be lent more epochs of fees than
+        // it has weeks of life left. Otherwise the loan outlives the collateral's productive life
+        // and — in the non-liquidating tier — can't self-repay before the lock expires, leaving a
+        // frozen, unrecoverable position. Permanent locks (veNEST) keep the full horizon.
+        uint256 effMultiplier = _effectiveMultiplier(params.veAdapter, tokenId);
+        if (effMultiplier == 0) return 0;
+
+        uint256 grossUsd = (minWeeklyUsd * effMultiplier * safetyBps) / BPS; // 1e18 USD
         uint256 loanUsd = PythPriceLib.priceUsd1e18(pyth, loanTokenFeed, maxAge, maxConfBps);
         if (loanUsd == 0) return 0;
         // USD(1e18) -> loanToken units.
         return (grossUsd * (10 ** loanTokenDecimals)) / loanUsd;
+    }
+
+    /// @dev Credit horizon (in epochs) for `tokenId`: full `multiplier` for a permanent lock,
+    ///      else capped to the lock's remaining whole weeks so the loan is self-repayable before
+    ///      expiry. Returns 0 for an already-expired lock.
+    function _effectiveMultiplier(address veAdapter, uint256 tokenId) internal view returns (uint256) {
+        if (IVeAdapter(veAdapter).isPermanentLock(tokenId)) return multiplier;
+        uint256 end = IVeAdapter(veAdapter).lockEnd(tokenId);
+        if (end <= block.timestamp) return 0;
+        uint256 weeksLeft = (end - block.timestamp) / 1 weeks;
+        return weeksLeft < multiplier ? weeksLeft : multiplier;
     }
 
     /// @dev Convert a raw reward-token amount to 1e18 USD; returns 0 for unmapped tokens.
